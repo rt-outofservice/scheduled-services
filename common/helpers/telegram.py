@@ -18,9 +18,11 @@ def send_telegram(message: str, hostname: str = "") -> None:
     if not message.strip():
         return
 
-    escaped = _escape_markdown_v1(message)
-
-    full_message = f"*{hostname}* \u2014 {escaped}" if hostname else escaped
+    if hostname:
+        escaped_hostname = _escape_markdown_v1(hostname)
+        full_message = f"*{escaped_hostname}* \u2014 {message}"
+    else:
+        full_message = message
 
     # Auto-split messages exceeding 4000 chars
     chunks = _split_message(full_message, max_len=4000)
@@ -148,11 +150,18 @@ if __name__ == "__main__":
                 self.assertNotIn("\u2014", sent)
 
             @patch("__main__._send_chunk")
-            def test_escapes_content(self, mock_send):
+            def test_preserves_markdown_in_content(self, mock_send):
                 send_telegram("*bold*")
                 mock_send.assert_called_once()
                 sent = mock_send.call_args[0][0]
-                self.assertIn("\\*bold\\*", sent)
+                self.assertIn("*bold*", sent)
+
+            @patch("__main__._send_chunk")
+            def test_escapes_hostname_special_chars(self, mock_send):
+                send_telegram("test msg", hostname="my_server_01")
+                mock_send.assert_called_once()
+                sent = mock_send.call_args[0][0]
+                self.assertTrue(sent.startswith("*my\\_server\\_01* \u2014 "))
 
             @patch("__main__._send_chunk")
             def test_empty_message_skipped(self, mock_send):

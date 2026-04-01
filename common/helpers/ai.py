@@ -27,13 +27,16 @@ def call_ai(prompt: str, model: str = "", timeout: int = 600) -> str:
     if model:
         cmd.extend(["--model", model])
 
-    result = subprocess.run(
-        cmd,
-        input=prompt,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise AIError(f"claude -p timed out after {timeout}s") from None
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
@@ -69,13 +72,16 @@ def call_ai_json(prompt: str, model: str = "", timeout: int = 600) -> dict | lis
 
 def _extract_json(text: str) -> str:
     """Extract JSON from text that may contain markdown code fences."""
-    # Strip markdown code fences if present
     stripped = text.strip()
-    if stripped.startswith("```"):
-        lines = stripped.split("\n")
+
+    # Find code fence anywhere in text (handles preamble before fence)
+    fence_start = stripped.find("```")
+    if fence_start != -1:
+        after_fence = stripped[fence_start:]
+        lines = after_fence.split("\n")
         # Remove first line (```json or ```) and last line (```)
         lines = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
-        stripped = "\n".join(lines).strip()
+        return "\n".join(lines).strip()
 
     return stripped
 
@@ -117,6 +123,13 @@ if __name__ == "__main__":
                 call_ai("prompt", timeout=120)
                 self.assertEqual(mock_run.call_args[1]["timeout"], 120)
 
+            @patch("subprocess.run")
+            def test_timeout_expired_raises_ai_error(self, mock_run):
+                mock_run.side_effect = subprocess.TimeoutExpired(cmd="claude", timeout=600)
+                with self.assertRaises(AIError) as ctx:
+                    call_ai("prompt")
+                self.assertIn("timed out", str(ctx.exception))
+
         class TestCallAIJson(unittest.TestCase):
             @patch("__main__.call_ai")
             def test_parses_json(self, mock_ai):
@@ -155,5 +168,13 @@ if __name__ == "__main__":
 
             def test_strips_whitespace(self):
                 self.assertEqual(_extract_json('  {"a": 1}  '), '{"a": 1}')
+
+            def test_with_preamble_before_fence(self):
+                text = 'Here is the JSON:\n```json\n{"a": 1}\n```'
+                self.assertEqual(_extract_json(text), '{"a": 1}')
+
+            def test_with_preamble_and_plain_fence(self):
+                text = "Sure, here you go:\n```\n[1, 2, 3]\n```"
+                self.assertEqual(_extract_json(text), "[1, 2, 3]")
 
         unittest.main(argv=["", "-v"], exit=True)

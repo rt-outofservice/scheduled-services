@@ -31,7 +31,7 @@ Scripts import shared utilities via sys.path manipulation:
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common" / "helpers"))
-from logging import setup_logging
+from log import setup_logging
 from telegram import send_telegram
 from ai import call_ai
 ```

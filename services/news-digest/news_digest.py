@@ -256,8 +256,7 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
         config = load_config(config_path)
     except (FileNotFoundError, ValueError) as e:
         logger.error(f"Config error: {e}")
-        hn = config.get("hostname", "") if isinstance(e, ValueError) else ""
-        send_telegram(f"news-digest FATAL: {e}", hostname=hn)
+        send_telegram(f"news-digest FATAL: {e}")
         return
 
     hostname = config.get("hostname", "")
@@ -737,6 +736,8 @@ class TestRunDigest(unittest.TestCase):
         run_digest(Path("/nonexistent/config.yaml"))
 
         mock_logger.error.assert_called()
+        mock_telegram.assert_called_once()
+        self.assertIn("FATAL", mock_telegram.call_args[0][0])
         mock_log_file.unlink(missing_ok=True)
 
     @patch.object(_mod, "send_telegram")

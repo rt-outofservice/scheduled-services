@@ -44,7 +44,7 @@ env.example-main.yml     Environment variable template
 
 ## Deployment
 
-Prerequisites: [spot](https://github.com/umputun/spot), `uv`, `yq`, `python3 >= 3.11`, plus any per-service binary deps listed in `.bindeps` files.
+Prerequisites: [spot](https://github.com/umputun/spot), `uv`, `yq`, `python3 >= 3.11`, `claude` (Claude Code CLI), plus any per-service binary deps listed in `.bindeps` files.
 
 1. Copy `env.example-main.yml` to `env.<host>-main.yml` and fill in real values
 2. Deploy:
@@ -69,7 +69,7 @@ Each Python script with business logic includes embedded tests:
 uv run python services/news-digest/news_digest.py --tests
 
 # Run all tests
-uv run python common/helpers/logging.py --tests
+uv run python common/helpers/log.py --tests
 uv run python common/helpers/telegram.py --tests
 uv run python common/helpers/ai.py --tests
 uv run python services/news-digest/fetch_feeds.py --tests

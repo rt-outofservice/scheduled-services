@@ -441,8 +441,7 @@ def run_summary(config_path: Path) -> None:
         config = load_config(config_path)
     except (FileNotFoundError, ValueError) as e:
         logger.error(f"Config error: {e}")
-        hn = config.get("hostname", "") if isinstance(e, ValueError) else ""
-        send_telegram(f"slack-summary FATAL: {e}", hostname=hn)
+        send_telegram(f"slack-summary FATAL: {e}")
         return
 
     hostname = config.get("hostname", "")
@@ -1105,6 +1104,8 @@ class TestRunSummary(unittest.TestCase):
         run_summary(Path("/nonexistent/config.yaml"))
 
         mock_logger.error.assert_called()
+        mock_tg.assert_called_once()
+        self.assertIn("FATAL", mock_tg.call_args[0][0])
         mock_log_file.unlink(missing_ok=True)
 
     @patch.object(_mod, "send_telegram")
