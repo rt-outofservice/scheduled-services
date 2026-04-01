@@ -11,6 +11,7 @@ scripts/              - Utility scripts (migration, etc.)
 docs/plans/           - Implementation plans
 playbook.main.yaml    - Spot deployment playbook
 env.example-main.yml  - Environment variable template
+.tool-versions        - Python version pin (asdf/mise)
 ```
 
 ## Testing
@@ -33,8 +34,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common" / "helpers"))
 from log import setup_logging
 from telegram import send_telegram
-from ai import call_ai
+from ai import call_ai, call_ai_json, AIError
 ```
+
+The `ai` module provides `call_ai(prompt)` for text responses, `call_ai_json(prompt)` for JSON-parsed responses, and raises `AIError` on failures.
 
 ## Config
 
@@ -47,6 +50,21 @@ Never fail silently. All fatal errors are logged AND sent via telegram. Non-fata
 ## Logging
 
 Daily log files at `~/.logs/scheduled-services/<service_name>/`. 30 most recent files kept per service.
+
+## Service CLI Arguments
+
+Beyond `--tests`, some services accept additional flags:
+
+- `news_digest.py --digest-names tech,security` — process only named feed groups
+- `pr_auto_approve.py --day-summary-only` — send day summary from reviews.md, then exit
+- `fetch_feeds.py --hours 24` — standalone feed fetch with time window (reads JSON from stdin)
+
+## Persistent State
+
+Some services maintain state files in their service directory (preserved across deploys):
+
+- `services/pr-auto-approve/reviews.md` — append-only log of all reviewed PRs/MRs
+- `services/slack-summary/user-cache.txt` — cached Slack user ID to display name mappings (USERID=DisplayName per line)
 
 ## Commands
 

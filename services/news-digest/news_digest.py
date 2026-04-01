@@ -352,11 +352,10 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
             send_telegram(f"news-digest FATAL: AI call failed for group {group_name}: {e}", hostname=hostname)
             continue
 
-        # Append warnings
-        digest_text += format_warnings(warnings)
-
-        # Truncate if needed
-        digest_text = truncate_message(digest_text, max_len=4000)
+        # Truncate AI text first, then append warnings so warnings survive
+        warning_text = format_warnings(warnings)
+        digest_text = truncate_message(digest_text, max_len=4000 - len(warning_text))
+        digest_text += warning_text
 
         # Send via telegram
         try:

@@ -513,11 +513,10 @@ def run_summary(config_path: Path) -> None:
             send_telegram(f"slack-summary FATAL: AI call failed: {e}", hostname=hostname)
             return
 
-        # Append warnings
-        summary_text += format_warnings(warnings)
-
-        # Truncate if needed
-        summary_text = truncate_message(summary_text, max_len=4000)
+        # Truncate AI text first, then append warnings so warnings survive
+        warning_text = format_warnings(warnings)
+        summary_text = truncate_message(summary_text, max_len=4000 - len(warning_text))
+        summary_text += warning_text
 
         # Send via telegram
         try:

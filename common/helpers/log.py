@@ -23,6 +23,8 @@ def setup_logging(service_name: str) -> tuple[logging.Logger, Path]:
 
     logger = logging.getLogger(f"scheduled-services.{service_name}")
     logger.setLevel(logging.DEBUG)
+    for h in logger.handlers:
+        h.close()
     logger.handlers.clear()
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
@@ -30,10 +32,9 @@ def setup_logging(service_name: str) -> tuple[logging.Logger, Path]:
     file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     logger.addHandler(file_handler)
 
-    # Redirect stdout/stderr to the log file
-    log_stream = open(log_file, "a", encoding="utf-8")  # noqa: SIM115
-    sys.stdout = log_stream
-    sys.stderr = log_stream
+    # Redirect stdout/stderr to the same stream used by FileHandler
+    sys.stdout = file_handler.stream
+    sys.stderr = file_handler.stream
 
     # Cleanup old logs — keep 30 most recent
     _cleanup_old_logs(log_dir, keep=30)

@@ -446,7 +446,7 @@ def build_review_prompt(diff: str, pr_title: str) -> str:
         '{"decision": "approve" or "skip", "reason": "brief explanation"}\n\n'
         "If the changes are safe routine infra/DevOps changes, decide 'approve'.\n"
         "If you see any concerns or the changes are outside infra/DevOps scope, decide 'skip'.\n\n"
-        f"Diff:\n{diff[:8000]}"
+        f"Diff:\n{diff}"
     )
 
 
@@ -684,6 +684,19 @@ def _run_review_loop(
                 if not diff:
                     logger.warning(f"Could not get diff for {repo}#{pr_number}")
                     warnings.append(f"No diff for {repo}#{pr_number}")
+                    continue
+
+                if len(diff) > 8000:
+                    logger.info(f"Diff too large for AI review: {repo}#{pr_number} ({len(diff)} chars)")
+                    append_review(
+                        reviews_file,
+                        repo,
+                        pr_number,
+                        pr["author"],
+                        pr["title"],
+                        f"diff {len(diff)} chars",
+                        "skipped-large-diff",
+                    )
                     continue
 
                 prompt = build_review_prompt(diff, pr["title"])
@@ -1167,11 +1180,11 @@ if __name__ == "__main__":
                 self.assertIn("security groups", prompt.lower())
                 self.assertIn("approve", prompt)
 
-            def test_truncates_long_diff(self):
-                long_diff = "x" * 10000
-                prompt = build_review_prompt(long_diff, "Big PR")
-                # Diff should be truncated to 8000 chars
-                self.assertLess(len(prompt), 9000)
+            def test_includes_full_diff(self):
+                # Diffs > 8000 chars are skipped upstream; build_review_prompt receives the full diff
+                diff = "x" * 5000
+                prompt = build_review_prompt(diff, "Big PR")
+                self.assertIn(diff, prompt)
 
         class TestFormatWarnings(unittest.TestCase):
             def test_no_warnings(self):
@@ -1415,7 +1428,8 @@ if __name__ == "__main__":
                     }
                 ]
 
-                with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+                lock_path = Path(tmpdir) / ".lock"
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
                     run_review(config_path)
 
                 # Should log a warning about empty diff
@@ -1447,7 +1461,8 @@ if __name__ == "__main__":
                 with open(config_path, "w") as f:
                     yaml.dump(config, f)
 
-                with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+                lock_path = Path(tmpdir) / ".lock"
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
                     run_review(config_path)
 
                 # Should log a warning about no repos
