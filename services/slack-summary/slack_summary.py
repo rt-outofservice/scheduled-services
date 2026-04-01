@@ -21,10 +21,8 @@ import subprocess
 import sys
 import tempfile
 import time
-import unittest
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import yaml
 
@@ -458,87 +456,84 @@ def run_summary(config_path: Path) -> None:
 
     # Dump channels into a unique temp directory
     dump_dir = Path(tempfile.mkdtemp(prefix=DUMP_DIR_PREFIX))
-    channel_files, warnings = dump_all_channels(channels, time_from, dump_dir, logger)
-
-    if not channel_files:
-        logger.error("All channel dumps failed")
-        send_telegram("slack-summary FATAL: all channel dumps failed", hostname=hostname)
-        shutil.rmtree(dump_dir, ignore_errors=True)
-        return
-
-    # Parse messages
-    all_user_ids: set[str] = set()
-    channels_data: list[dict] = []
-    for channel_id, json_path in channel_files.items():
-        channel_info, messages, parse_error = parse_channel_messages(json_path, logger)
-        if parse_error:
-            warnings.append(f"Parse error for {channel_id}: {parse_error}")
-        if not messages:
-            if not parse_error:
-                logger.info(f"No messages in channel {channel_id}")
-            continue
-        # Collect user IDs for resolution
-        for msg in messages:
-            if msg["user"]:
-                all_user_ids.add(msg["user"])
-            # Also collect mentioned user IDs
-            for match in re.finditer(r"<@(U[A-Z0-9]+)>", msg["text"]):
-                all_user_ids.add(match.group(1))
-        channels_data.append(
-            {
-                "channel_id": channel_id,
-                "name": channel_info.get("name", ""),
-                "messages": messages,
-            }
-        )
-
-    if not channels_data:
-        logger.info("No messages found in any channel")
-        msg = "slack-summary: no messages found in the configured timeframe"
-        msg += format_warnings(warnings)
-        send_telegram(msg, hostname=hostname)
-        # Cleanup
-        shutil.rmtree(dump_dir, ignore_errors=True)
-        return
-
-    # Resolve user IDs
-    cache_path = get_user_cache_path()
-    user_cache = load_user_cache(cache_path)
-    user_cache = resolve_users_via_slackdump(all_user_ids, user_cache, cache_path, logger)
-
-    # Build AI prompt
-    prompt = build_ai_prompt(channels_data, user_cache, user_id, timeframe)
-
-    # Call AI
     try:
-        summary_text = call_ai(prompt)
-    except AIError as e:
-        logger.error(f"AI call failed: {e}")
-        send_telegram(f"slack-summary FATAL: AI call failed: {e}", hostname=hostname)
+        channel_files, warnings = dump_all_channels(channels, time_from, dump_dir, logger)
+
+        if not channel_files:
+            logger.error("All channel dumps failed")
+            send_telegram("slack-summary FATAL: all channel dumps failed", hostname=hostname)
+            return
+
+        # Parse messages
+        all_user_ids: set[str] = set()
+        channels_data: list[dict] = []
+        for channel_id, json_path in channel_files.items():
+            channel_info, messages, parse_error = parse_channel_messages(json_path, logger)
+            if parse_error:
+                warnings.append(f"Parse error for {channel_id}: {parse_error}")
+            if not messages:
+                if not parse_error:
+                    logger.info(f"No messages in channel {channel_id}")
+                continue
+            # Collect user IDs for resolution
+            for msg in messages:
+                if msg["user"]:
+                    all_user_ids.add(msg["user"])
+                # Also collect mentioned user IDs
+                for match in re.finditer(r"<@(U[A-Z0-9]+)>", msg["text"]):
+                    all_user_ids.add(match.group(1))
+            channels_data.append(
+                {
+                    "channel_id": channel_id,
+                    "name": channel_info.get("name", ""),
+                    "messages": messages,
+                }
+            )
+
+        if not channels_data:
+            logger.info("No messages found in any channel")
+            msg = "slack-summary: no messages found in the configured timeframe"
+            msg += format_warnings(warnings)
+            send_telegram(msg, hostname=hostname)
+            return
+
+        # Resolve user IDs
+        cache_path = get_user_cache_path()
+        user_cache = load_user_cache(cache_path)
+        user_cache = resolve_users_via_slackdump(all_user_ids, user_cache, cache_path, logger)
+
+        # Build AI prompt
+        prompt = build_ai_prompt(channels_data, user_cache, user_id, timeframe)
+
+        # Call AI
+        try:
+            summary_text = call_ai(prompt)
+        except AIError as e:
+            logger.error(f"AI call failed: {e}")
+            send_telegram(f"slack-summary FATAL: AI call failed: {e}", hostname=hostname)
+            return
+
+        # Append warnings
+        summary_text += format_warnings(warnings)
+
+        # Truncate if needed
+        summary_text = truncate_message(summary_text, max_len=4000)
+
+        # Send via telegram
+        try:
+            sent_ok = send_telegram(summary_text, hostname=hostname)
+        except Exception as e:
+            logger.error(f"Telegram send failed: {e}")
+            sent_ok = False
+
+        if sent_ok:
+            logger.info("Slack summary sent successfully")
+        else:
+            logger.warning("Slack summary telegram delivery failed")
+
+        logger.info("slack-summary service finished")
+    finally:
         shutil.rmtree(dump_dir, ignore_errors=True)
-        return
-
-    # Append warnings
-    summary_text += format_warnings(warnings)
-
-    # Truncate if needed
-    summary_text = truncate_message(summary_text, max_len=4000)
-
-    # Send via telegram
-    try:
-        sent_ok = send_telegram(summary_text, hostname=hostname)
-    except Exception as e:
-        logger.error(f"Telegram send failed: {e}")
-        sent_ok = False
-
-    if sent_ok:
-        logger.info("Slack summary sent successfully")
-    else:
-        logger.warning("Slack summary telegram delivery failed")
-
-    # Cleanup
-    shutil.rmtree(dump_dir, ignore_errors=True)
-    logger.info("slack-summary service finished")
 
 
 def main() -> None:
@@ -555,667 +550,652 @@ def main() -> None:
     run_summary(config_path)
 
 
-# ---------- Tests (run with: uv run python services/slack-summary/slack_summary.py --tests) ----------
-
-_mod = sys.modules[__name__]
-
-
-class TestLoadConfig(unittest.TestCase):
-    def test_valid_config(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump(
-                {
-                    "hostname": "test",
-                    "channels": ["C01ABC", "D02DEF"],
-                    "timeframe": "14h",
-                    "user_id": "U123",
-                },
-                f,
-            )
-            f.flush()
-            config = load_config(Path(f.name))
-        self.assertEqual(config["hostname"], "test")
-        self.assertEqual(len(config["channels"]), 2)
-        Path(f.name).unlink()
-
-    def test_missing_config(self):
-        with self.assertRaises(FileNotFoundError):
-            load_config(Path("/nonexistent/config.yaml"))
-
-    def test_missing_channels_key(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test", "timeframe": "14h"}, f)
-            f.flush()
-            with self.assertRaises(ValueError):
-                load_config(Path(f.name))
-        Path(f.name).unlink()
-
-    def test_empty_channels(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test", "channels": [], "timeframe": "14h"}, f)
-            f.flush()
-            with self.assertRaises(ValueError):
-                load_config(Path(f.name))
-        Path(f.name).unlink()
-
-    def test_missing_timeframe(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test", "channels": ["C01ABC"]}, f)
-            f.flush()
-            with self.assertRaises(ValueError):
-                load_config(Path(f.name))
-        Path(f.name).unlink()
-
-
-class TestParseTimeframe(unittest.TestCase):
-    def test_hours(self):
-        result = parse_timeframe("14h")
-        now = datetime.now(UTC)
-        expected = now - timedelta(hours=14)
-        self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
-
-    def test_minutes(self):
-        result = parse_timeframe("30m")
-        now = datetime.now(UTC)
-        expected = now - timedelta(minutes=30)
-        self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
-
-    def test_days(self):
-        result = parse_timeframe("1d")
-        now = datetime.now(UTC)
-        expected = now - timedelta(days=1)
-        self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
-
-    def test_invalid_format(self):
-        with self.assertRaises(ValueError):
-            parse_timeframe("abc")
-
-    def test_invalid_unit(self):
-        with self.assertRaises(ValueError):
-            parse_timeframe("14x")
-
-    def test_whitespace_stripped(self):
-        result = parse_timeframe("  14h  ")
-        now = datetime.now(UTC)
-        expected = now - timedelta(hours=14)
-        self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
-
-
-class TestFormatTimestampIso(unittest.TestCase):
-    def test_format(self):
-        dt = datetime(2026, 4, 1, 10, 30, 0, tzinfo=UTC)
-        self.assertEqual(format_timestamp_iso(dt), "2026-04-01T10:30:00")
-
-
-class TestValidateSlackdumpAuth(unittest.TestCase):
-    @patch("subprocess.run")
-    def test_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-        logger = MagicMock(spec=logging.Logger)
-        result = validate_slackdump_auth("C01ABC", logger)
-        self.assertTrue(result)
-
-    @patch("subprocess.run")
-    def test_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="auth expired")
-        logger = MagicMock(spec=logging.Logger)
-        result = validate_slackdump_auth("C01ABC", logger)
-        self.assertFalse(result)
-
-    @patch("subprocess.run")
-    def test_timeout(self, mock_run):
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="slackdump", timeout=60)
-        logger = MagicMock(spec=logging.Logger)
-        result = validate_slackdump_auth("C01ABC", logger)
-        self.assertFalse(result)
-
-    @patch("subprocess.run")
-    def test_binary_not_found(self, mock_run):
-        mock_run.side_effect = FileNotFoundError()
-        logger = MagicMock(spec=logging.Logger)
-        result = validate_slackdump_auth("C01ABC", logger)
-        self.assertFalse(result)
-
-
-class TestValidateAuthWithRetries(unittest.TestCase):
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "validate_slackdump_auth", return_value=True)
-    def test_immediate_success(self, mock_auth, mock_tg):
-        logger = MagicMock(spec=logging.Logger)
-        result = validate_auth_with_retries("C01ABC", "host", logger)
-        self.assertTrue(result)
-        mock_tg.assert_not_called()
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "validate_slackdump_auth", side_effect=[False, False, True])
-    def test_succeeds_after_retries(self, mock_auth, mock_tg):
-        logger = MagicMock(spec=logging.Logger)
-        result = validate_auth_with_retries("C01ABC", "host", logger, sleep_fn=lambda _: None)
-        self.assertTrue(result)
-        # Should have sent "expired" and "restored" notifications
-        self.assertEqual(mock_tg.call_count, 2)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "validate_slackdump_auth", return_value=False)
-    def test_exhausted_retries(self, mock_auth, mock_tg):
-        logger = MagicMock(spec=logging.Logger)
-        result = validate_auth_with_retries("C01ABC", "host", logger, sleep_fn=lambda _: None)
-        self.assertFalse(result)
-        # Should have sent "expired" and "FATAL" notifications
-        self.assertEqual(mock_tg.call_count, 2)
-        fatal_calls = [c for c in mock_tg.call_args_list if "FATAL" in str(c)]
-        self.assertEqual(len(fatal_calls), 1)
-
-
-class TestParseChannelMessages(unittest.TestCase):
-    def test_normal_messages(self):
-        import tempfile
-
-        data = {
-            "channel_id": "C01ABC",
-            "name": "general",
-            "messages": [
-                {"type": "message", "user": "U123", "text": "hello world", "ts": "1774272716.060739"},
-                {"type": "message", "user": "U456", "text": "hi there", "ts": "1774272717.060739"},
-            ],
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(data, f)
-            f.flush()
-            info, msgs, err = parse_channel_messages(f.name, MagicMock())
-        self.assertEqual(info["channel_id"], "C01ABC")
-        self.assertEqual(info["name"], "general")
-        self.assertEqual(len(msgs), 2)
-        self.assertEqual(msgs[0]["user"], "U123")
-        self.assertEqual(msgs[0]["text"], "hello world")
-        self.assertEqual(err, "")
-        Path(f.name).unlink()
-
-    def test_filters_bot_messages(self):
-        import tempfile
-
-        data = {
-            "channel_id": "C01ABC",
-            "name": "general",
-            "messages": [
-                {"type": "message", "subtype": "bot_message", "user": "B001", "text": "bot msg", "ts": "1.0"},
-                {"type": "message", "user": "U123", "text": "human msg", "ts": "2.0"},
-                {"type": "message", "subtype": "bot_add", "user": "B002", "text": "added", "ts": "3.0"},
-            ],
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(data, f)
-            f.flush()
-            _, msgs, _ = parse_channel_messages(f.name, MagicMock())
-        self.assertEqual(len(msgs), 1)
-        self.assertEqual(msgs[0]["text"], "human msg")
-        Path(f.name).unlink()
-
-    def test_filters_non_message_types(self):
-        import tempfile
-
-        data = {
-            "channel_id": "C01ABC",
-            "name": "general",
-            "messages": [
-                {"type": "channel_join", "user": "U123", "text": "joined", "ts": "1.0"},
-                {"type": "message", "user": "U123", "text": "real msg", "ts": "2.0"},
-            ],
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(data, f)
-            f.flush()
-            _, msgs, _ = parse_channel_messages(f.name, MagicMock())
-        self.assertEqual(len(msgs), 1)
-        Path(f.name).unlink()
-
-    def test_skips_empty_text(self):
-        import tempfile
-
-        data = {
-            "channel_id": "C01ABC",
-            "name": "general",
-            "messages": [
-                {"type": "message", "user": "U123", "text": "", "ts": "1.0"},
-                {"type": "message", "user": "U456", "text": "   ", "ts": "2.0"},
-            ],
-        }
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(data, f)
-            f.flush()
-            _, msgs, _ = parse_channel_messages(f.name, MagicMock())
-        self.assertEqual(len(msgs), 0)
-        Path(f.name).unlink()
-
-    def test_invalid_json(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            f.write("not valid json")
-            f.flush()
-            info, msgs, err = parse_channel_messages(f.name, MagicMock())
-        self.assertEqual(info, {})
-        self.assertEqual(msgs, [])
-        self.assertNotEqual(err, "")
-        Path(f.name).unlink()
-
-
-class TestUserCache(unittest.TestCase):
-    def test_load_and_save(self):
-        import tempfile
-
-        cache_path = Path(tempfile.mktemp(suffix=".txt"))
-        cache = {"U123": "Alice", "U456": "Bob"}
-        save_user_cache(cache_path, cache)
-        loaded = load_user_cache(cache_path)
-        self.assertEqual(loaded, cache)
-        cache_path.unlink()
-
-    def test_load_empty(self):
-        import tempfile
-
-        cache_path = Path(tempfile.mktemp(suffix=".txt"))
-        cache_path.write_text("")
-        loaded = load_user_cache(cache_path)
-        self.assertEqual(loaded, {})
-        cache_path.unlink()
-
-    def test_load_nonexistent(self):
-        loaded = load_user_cache(Path("/nonexistent/cache.txt"))
-        self.assertEqual(loaded, {})
-
-    def test_load_malformed_lines(self):
-        import tempfile
-
-        cache_path = Path(tempfile.mktemp(suffix=".txt"))
-        cache_path.write_text("U123=Alice\nbadline\nU456=Bob\n")
-        loaded = load_user_cache(cache_path)
-        self.assertEqual(len(loaded), 2)
-        self.assertEqual(loaded["U123"], "Alice")
-        cache_path.unlink()
-
-
-class TestResolveUsers(unittest.TestCase):
-    @patch("subprocess.run")
-    def test_resolves_from_slackdump(self, mock_run):
-        import tempfile
-
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="U123\tAlice Smith\tAlice\talice@co.com\nU456\tBob Jones\tBob\tbob@co.com\n",
-            stderr="",
-        )
-        cache_path = Path(tempfile.mktemp(suffix=".txt"))
-        cache = {}
-        result = resolve_users_via_slackdump(
-            {"U123", "U456"},
-            cache,
-            cache_path,
-            MagicMock(),
-        )
-        self.assertEqual(result["U123"], "Alice")
-        self.assertEqual(result["U456"], "Bob")
-        cache_path.unlink()
-
-    @patch("subprocess.run")
-    def test_skips_cached_users(self, mock_run):
-        import tempfile
-
-        cache_path = Path(tempfile.mktemp(suffix=".txt"))
-        cache = {"U123": "Alice"}
-        result = resolve_users_via_slackdump(
-            {"U123"},
-            cache,
-            cache_path,
-            MagicMock(),
-        )
-        self.assertEqual(result["U123"], "Alice")
-        mock_run.assert_not_called()
-        cache_path.unlink(missing_ok=True)
-
-    @patch("subprocess.run")
-    def test_strips_markdown_chars(self, mock_run):
-        import tempfile
-
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="U123\tAlice *Smith*\tAlice_S\talice@co.com\n",
-            stderr="",
-        )
-        cache_path = Path(tempfile.mktemp(suffix=".txt"))
-        result = resolve_users_via_slackdump(
-            {"U123"},
-            {},
-            cache_path,
-            MagicMock(),
-        )
-        self.assertNotIn("*", result.get("U123", ""))
-        self.assertNotIn("_", result.get("U123", ""))
-        cache_path.unlink()
-
-
-class TestIsDmChannel(unittest.TestCase):
-    def test_dm_channel(self):
-        self.assertTrue(is_dm_channel("D04GHIJKL"))
-
-    def test_public_channel(self):
-        self.assertFalse(is_dm_channel("C01ABCDEF"))
-
-    def test_empty(self):
-        self.assertFalse(is_dm_channel(""))
-
-
-class TestBuildAIPrompt(unittest.TestCase):
-    def test_includes_channel_data(self):
-        channels_data = [
-            {
-                "channel_id": "C01ABC",
-                "name": "general",
-                "messages": [{"user": "U123", "text": "hello", "ts": "1.0"}],
-            }
-        ]
-        prompt = build_ai_prompt(channels_data, {"U123": "Alice"}, "", "14h")
-        self.assertIn("general", prompt)
-        self.assertIn("@Alice", prompt)
-        self.assertIn("14h", prompt)
-
-    def test_mentions_section_when_user_id(self):
-        channels_data = [
-            {
-                "channel_id": "C01ABC",
-                "name": "general",
-                "messages": [{"user": "U123", "text": "hello", "ts": "1.0"}],
-            }
-        ]
-        prompt = build_ai_prompt(channels_data, {"U789": "Me"}, "U789", "14h")
-        self.assertIn("MENTIONS", prompt)
-        self.assertIn("@Me", prompt)
-
-    def test_no_mentions_section_without_user_id(self):
-        channels_data = [
-            {
-                "channel_id": "C01ABC",
-                "name": "general",
-                "messages": [{"user": "U123", "text": "hello", "ts": "1.0"}],
-            }
-        ]
-        prompt = build_ai_prompt(channels_data, {}, "", "14h")
-        self.assertNotIn("MENTIONS", prompt)
-
-    def test_resolves_user_mentions_in_text(self):
-        channels_data = [
-            {
-                "channel_id": "C01ABC",
-                "name": "general",
-                "messages": [{"user": "U123", "text": "hey <@U456> check this", "ts": "1.0"}],
-            }
-        ]
-        prompt = build_ai_prompt(channels_data, {"U123": "Alice", "U456": "Bob"}, "", "14h")
-        self.assertIn("@Bob", prompt)
-        self.assertNotIn("<@U456>", prompt)
-
-    def test_dm_channel_type(self):
-        channels_data = [
-            {
-                "channel_id": "D01ABC",
-                "name": "",
-                "messages": [{"user": "U123", "text": "private msg", "ts": "1.0"}],
-            }
-        ]
-        prompt = build_ai_prompt(channels_data, {}, "", "14h")
-        self.assertIn('"type": "DM"', prompt)
-
-
-class TestTruncateMessage(unittest.TestCase):
-    def test_short_message(self):
-        self.assertEqual(truncate_message("hello", 4000), "hello")
-
-    def test_long_message(self):
-        msg = "a" * 5000
-        result = truncate_message(msg, 4000)
-        self.assertLessEqual(len(result), 4000)
-        self.assertIn("truncated", result)
-
-    def test_truncates_at_newline(self):
-        msg = "line1\n" * 800
-        result = truncate_message(msg, 100)
-        self.assertLessEqual(len(result), 100)
-
-
-class TestFormatWarnings(unittest.TestCase):
-    def test_no_warnings(self):
-        self.assertEqual(format_warnings([]), "")
-
-    def test_single_warning(self):
-        result = format_warnings(["dump failed for C01"])
-        self.assertIn("Note:", result)
-        self.assertIn("dump failed for C01", result)
-
-    def test_multiple_warnings(self):
-        result = format_warnings(["dump failed", "parse error"])
-        self.assertIn("; ", result)
-
-
-class TestRunSummary(unittest.TestCase):
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "call_ai", return_value="*Slack Summary*\n\nActive discussion in #general.")
-    @patch.object(_mod, "resolve_users_via_slackdump", return_value={"U123": "Alice"})
-    @patch.object(_mod, "load_user_cache", return_value={})
-    @patch.object(_mod, "get_user_cache_path")
-    @patch.object(_mod, "parse_channel_messages")
-    @patch.object(_mod, "dump_all_channels")
-    @patch.object(_mod, "validate_auth_with_retries", return_value=True)
-    @patch.object(_mod, "setup_logging")
-    def test_full_flow(
-        self,
-        mock_logging,
-        mock_auth,
-        mock_dump,
-        mock_parse,
-        mock_cache_path,
-        mock_load_cache,
-        mock_resolve,
-        mock_ai,
-        mock_tg,
-    ):
-        import tempfile
-
-        # Setup logging mock
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        # Setup cache path mock
-        mock_cache_path.return_value = Path(tempfile.mktemp(suffix=".txt"))
-
-        # Write config
-        config_dir = tempfile.mkdtemp()
-        config_path = Path(config_dir) / "config.yaml"
-        config = {
-            "hostname": "testhost",
-            "channels": ["C01ABC"],
-            "timeframe": "14h",
-            "user_id": "U789",
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        # Mock dump results
-        mock_dump.return_value = ({"C01ABC": "/tmp/C01ABC.json"}, [])
-
-        # Mock parse results
-        mock_parse.return_value = (
-            {"channel_id": "C01ABC", "name": "general"},
-            [{"user": "U123", "text": "hello world", "ts": "1.0"}],
-            "",
-        )
-
-        run_summary(config_path)
-
-        mock_auth.assert_called_once()
-        mock_dump.assert_called_once()
-        mock_ai.assert_called_once()
-        mock_tg.assert_called()
-
-        mock_log_file.unlink(missing_ok=True)
-        mock_cache_path.return_value.unlink(missing_ok=True)
-        shutil.rmtree(config_dir)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "setup_logging")
-    def test_missing_config(self, mock_logging, mock_tg):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        run_summary(Path("/nonexistent/config.yaml"))
-
-        mock_logger.error.assert_called()
-        mock_tg.assert_called_once()
-        self.assertIn("FATAL", mock_tg.call_args[0][0])
-        mock_log_file.unlink(missing_ok=True)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "validate_auth_with_retries", return_value=False)
-    @patch.object(_mod, "setup_logging")
-    def test_auth_failure_stops(self, mock_logging, mock_auth, mock_tg):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        config_dir = tempfile.mkdtemp()
-        config_path = Path(config_dir) / "config.yaml"
-        config = {
-            "hostname": "testhost",
-            "channels": ["C01ABC"],
-            "timeframe": "14h",
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        run_summary(config_path)
-
-        # Auth failed — should not proceed to dump
-        mock_auth.assert_called_once()
-
-        mock_log_file.unlink(missing_ok=True)
-        shutil.rmtree(config_dir)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "dump_all_channels", return_value=({}, ["Failed to dump C01ABC"]))
-    @patch.object(_mod, "validate_auth_with_retries", return_value=True)
-    @patch.object(_mod, "setup_logging")
-    def test_all_dumps_failed(self, mock_logging, mock_auth, mock_dump, mock_tg):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        config_dir = tempfile.mkdtemp()
-        config_path = Path(config_dir) / "config.yaml"
-        config = {
-            "hostname": "testhost",
-            "channels": ["C01ABC"],
-            "timeframe": "14h",
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        run_summary(config_path)
-
-        # Should send FATAL
-        fatal_calls = [c for c in mock_tg.call_args_list if "FATAL" in str(c)]
-        self.assertGreater(len(fatal_calls), 0)
-
-        mock_log_file.unlink(missing_ok=True)
-        shutil.rmtree(config_dir)
-
-
-class TestDumpChannel(unittest.TestCase):
-    @patch("subprocess.run")
-    def test_success(self, mock_run):
-        import tempfile
-
-        dump_dir = Path(tempfile.mkdtemp())
-        json_file = dump_dir / "C01ABC.json"
-        json_file.write_text('{"messages": []}')
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        result = dump_channel("C01ABC", "2026-04-01T00:00:00", dump_dir, MagicMock())
-        self.assertIsNotNone(result)
-        shutil.rmtree(dump_dir)
-
-    @patch("subprocess.run")
-    def test_failure(self, mock_run):
-        import tempfile
-
-        dump_dir = Path(tempfile.mkdtemp())
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
-
-        result = dump_channel("C01ABC", "2026-04-01T00:00:00", dump_dir, MagicMock())
-        self.assertIsNone(result)
-        shutil.rmtree(dump_dir)
-
-
-class TestDumpAllChannels(unittest.TestCase):
-    @patch.object(_mod, "dump_channel")
-    def test_dumps_all_with_delay(self, mock_dump):
-        import tempfile
-
-        dump_dir = Path(tempfile.mkdtemp())
-        mock_dump.return_value = str(dump_dir / "C01.json")
-        sleep_calls = []
-
-        files, warnings = dump_all_channels(
-            ["C01", "C02"],
-            "2026-04-01T00:00:00",
-            dump_dir,
-            MagicMock(),
-            sleep_fn=lambda s: sleep_calls.append(s),
-        )
-        self.assertEqual(len(files), 2)
-        self.assertEqual(len(warnings), 0)
-        self.assertEqual(len(sleep_calls), 1)  # sleep between channels
-        shutil.rmtree(dump_dir)
-
-    @patch.object(_mod, "dump_channel")
-    def test_collects_warnings_on_failure(self, mock_dump):
-        import tempfile
-
-        dump_dir = Path(tempfile.mkdtemp())
-        mock_dump.return_value = None
-
-        files, warnings = dump_all_channels(
-            ["C01"],
-            "2026-04-01T00:00:00",
-            dump_dir,
-            MagicMock(),
-            sleep_fn=lambda _: None,
-        )
-        self.assertEqual(len(files), 0)
-        self.assertEqual(len(warnings), 1)
-        shutil.rmtree(dump_dir)
-
-
 if __name__ == "__main__":
     if "--tests" in sys.argv:
+        import unittest
+        from unittest.mock import MagicMock, patch
+
+        _mod = sys.modules[__name__]
+
+        class TestLoadConfig(unittest.TestCase):
+            def test_valid_config(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump(
+                        {
+                            "hostname": "test",
+                            "channels": ["C01ABC", "D02DEF"],
+                            "timeframe": "14h",
+                            "user_id": "U123",
+                        },
+                        f,
+                    )
+                    f.flush()
+                    config = load_config(Path(f.name))
+                self.assertEqual(config["hostname"], "test")
+                self.assertEqual(len(config["channels"]), 2)
+                Path(f.name).unlink()
+
+            def test_missing_config(self):
+                with self.assertRaises(FileNotFoundError):
+                    load_config(Path("/nonexistent/config.yaml"))
+
+            def test_missing_channels_key(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test", "timeframe": "14h"}, f)
+                    f.flush()
+                    with self.assertRaises(ValueError):
+                        load_config(Path(f.name))
+                Path(f.name).unlink()
+
+            def test_empty_channels(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test", "channels": [], "timeframe": "14h"}, f)
+                    f.flush()
+                    with self.assertRaises(ValueError):
+                        load_config(Path(f.name))
+                Path(f.name).unlink()
+
+            def test_missing_timeframe(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test", "channels": ["C01ABC"]}, f)
+                    f.flush()
+                    with self.assertRaises(ValueError):
+                        load_config(Path(f.name))
+                Path(f.name).unlink()
+
+        class TestParseTimeframe(unittest.TestCase):
+            def test_hours(self):
+                result = parse_timeframe("14h")
+                now = datetime.now(UTC)
+                expected = now - timedelta(hours=14)
+                self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
+
+            def test_minutes(self):
+                result = parse_timeframe("30m")
+                now = datetime.now(UTC)
+                expected = now - timedelta(minutes=30)
+                self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
+
+            def test_days(self):
+                result = parse_timeframe("1d")
+                now = datetime.now(UTC)
+                expected = now - timedelta(days=1)
+                self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
+
+            def test_invalid_format(self):
+                with self.assertRaises(ValueError):
+                    parse_timeframe("abc")
+
+            def test_invalid_unit(self):
+                with self.assertRaises(ValueError):
+                    parse_timeframe("14x")
+
+            def test_whitespace_stripped(self):
+                result = parse_timeframe("  14h  ")
+                now = datetime.now(UTC)
+                expected = now - timedelta(hours=14)
+                self.assertAlmostEqual(result.timestamp(), expected.timestamp(), delta=2)
+
+        class TestFormatTimestampIso(unittest.TestCase):
+            def test_format(self):
+                dt = datetime(2026, 4, 1, 10, 30, 0, tzinfo=UTC)
+                self.assertEqual(format_timestamp_iso(dt), "2026-04-01T10:30:00")
+
+        class TestValidateSlackdumpAuth(unittest.TestCase):
+            @patch("subprocess.run")
+            def test_success(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                logger = MagicMock(spec=logging.Logger)
+                result = validate_slackdump_auth("C01ABC", logger)
+                self.assertTrue(result)
+
+            @patch("subprocess.run")
+            def test_failure(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="auth expired")
+                logger = MagicMock(spec=logging.Logger)
+                result = validate_slackdump_auth("C01ABC", logger)
+                self.assertFalse(result)
+
+            @patch("subprocess.run")
+            def test_timeout(self, mock_run):
+                mock_run.side_effect = subprocess.TimeoutExpired(cmd="slackdump", timeout=60)
+                logger = MagicMock(spec=logging.Logger)
+                result = validate_slackdump_auth("C01ABC", logger)
+                self.assertFalse(result)
+
+            @patch("subprocess.run")
+            def test_binary_not_found(self, mock_run):
+                mock_run.side_effect = FileNotFoundError()
+                logger = MagicMock(spec=logging.Logger)
+                result = validate_slackdump_auth("C01ABC", logger)
+                self.assertFalse(result)
+
+        class TestValidateAuthWithRetries(unittest.TestCase):
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "validate_slackdump_auth", return_value=True)
+            def test_immediate_success(self, mock_auth, mock_tg):
+                logger = MagicMock(spec=logging.Logger)
+                result = validate_auth_with_retries("C01ABC", "host", logger)
+                self.assertTrue(result)
+                mock_tg.assert_not_called()
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "validate_slackdump_auth", side_effect=[False, False, True])
+            def test_succeeds_after_retries(self, mock_auth, mock_tg):
+                logger = MagicMock(spec=logging.Logger)
+                result = validate_auth_with_retries("C01ABC", "host", logger, sleep_fn=lambda _: None)
+                self.assertTrue(result)
+                # Should have sent "expired" and "restored" notifications
+                self.assertEqual(mock_tg.call_count, 2)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "validate_slackdump_auth", return_value=False)
+            def test_exhausted_retries(self, mock_auth, mock_tg):
+                logger = MagicMock(spec=logging.Logger)
+                result = validate_auth_with_retries("C01ABC", "host", logger, sleep_fn=lambda _: None)
+                self.assertFalse(result)
+                # Should have sent "expired" and "FATAL" notifications
+                self.assertEqual(mock_tg.call_count, 2)
+                fatal_calls = [c for c in mock_tg.call_args_list if "FATAL" in str(c)]
+                self.assertEqual(len(fatal_calls), 1)
+
+        class TestParseChannelMessages(unittest.TestCase):
+            def test_normal_messages(self):
+                import tempfile
+
+                data = {
+                    "channel_id": "C01ABC",
+                    "name": "general",
+                    "messages": [
+                        {"type": "message", "user": "U123", "text": "hello world", "ts": "1774272716.060739"},
+                        {"type": "message", "user": "U456", "text": "hi there", "ts": "1774272717.060739"},
+                    ],
+                }
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                    json.dump(data, f)
+                    f.flush()
+                    info, msgs, err = parse_channel_messages(f.name, MagicMock())
+                self.assertEqual(info["channel_id"], "C01ABC")
+                self.assertEqual(info["name"], "general")
+                self.assertEqual(len(msgs), 2)
+                self.assertEqual(msgs[0]["user"], "U123")
+                self.assertEqual(msgs[0]["text"], "hello world")
+                self.assertEqual(err, "")
+                Path(f.name).unlink()
+
+            def test_filters_bot_messages(self):
+                import tempfile
+
+                data = {
+                    "channel_id": "C01ABC",
+                    "name": "general",
+                    "messages": [
+                        {"type": "message", "subtype": "bot_message", "user": "B001", "text": "bot msg", "ts": "1.0"},
+                        {"type": "message", "user": "U123", "text": "human msg", "ts": "2.0"},
+                        {"type": "message", "subtype": "bot_add", "user": "B002", "text": "added", "ts": "3.0"},
+                    ],
+                }
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                    json.dump(data, f)
+                    f.flush()
+                    _, msgs, _ = parse_channel_messages(f.name, MagicMock())
+                self.assertEqual(len(msgs), 1)
+                self.assertEqual(msgs[0]["text"], "human msg")
+                Path(f.name).unlink()
+
+            def test_filters_non_message_types(self):
+                import tempfile
+
+                data = {
+                    "channel_id": "C01ABC",
+                    "name": "general",
+                    "messages": [
+                        {"type": "channel_join", "user": "U123", "text": "joined", "ts": "1.0"},
+                        {"type": "message", "user": "U123", "text": "real msg", "ts": "2.0"},
+                    ],
+                }
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                    json.dump(data, f)
+                    f.flush()
+                    _, msgs, _ = parse_channel_messages(f.name, MagicMock())
+                self.assertEqual(len(msgs), 1)
+                Path(f.name).unlink()
+
+            def test_skips_empty_text(self):
+                import tempfile
+
+                data = {
+                    "channel_id": "C01ABC",
+                    "name": "general",
+                    "messages": [
+                        {"type": "message", "user": "U123", "text": "", "ts": "1.0"},
+                        {"type": "message", "user": "U456", "text": "   ", "ts": "2.0"},
+                    ],
+                }
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                    json.dump(data, f)
+                    f.flush()
+                    _, msgs, _ = parse_channel_messages(f.name, MagicMock())
+                self.assertEqual(len(msgs), 0)
+                Path(f.name).unlink()
+
+            def test_invalid_json(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                    f.write("not valid json")
+                    f.flush()
+                    info, msgs, err = parse_channel_messages(f.name, MagicMock())
+                self.assertEqual(info, {})
+                self.assertEqual(msgs, [])
+                self.assertNotEqual(err, "")
+                Path(f.name).unlink()
+
+        class TestUserCache(unittest.TestCase):
+            def test_load_and_save(self):
+                import tempfile
+
+                cache_path = Path(tempfile.mktemp(suffix=".txt"))
+                cache = {"U123": "Alice", "U456": "Bob"}
+                save_user_cache(cache_path, cache)
+                loaded = load_user_cache(cache_path)
+                self.assertEqual(loaded, cache)
+                cache_path.unlink()
+
+            def test_load_empty(self):
+                import tempfile
+
+                cache_path = Path(tempfile.mktemp(suffix=".txt"))
+                cache_path.write_text("")
+                loaded = load_user_cache(cache_path)
+                self.assertEqual(loaded, {})
+                cache_path.unlink()
+
+            def test_load_nonexistent(self):
+                loaded = load_user_cache(Path("/nonexistent/cache.txt"))
+                self.assertEqual(loaded, {})
+
+            def test_load_malformed_lines(self):
+                import tempfile
+
+                cache_path = Path(tempfile.mktemp(suffix=".txt"))
+                cache_path.write_text("U123=Alice\nbadline\nU456=Bob\n")
+                loaded = load_user_cache(cache_path)
+                self.assertEqual(len(loaded), 2)
+                self.assertEqual(loaded["U123"], "Alice")
+                cache_path.unlink()
+
+        class TestResolveUsers(unittest.TestCase):
+            @patch("subprocess.run")
+            def test_resolves_from_slackdump(self, mock_run):
+                import tempfile
+
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="U123\tAlice Smith\tAlice\talice@co.com\nU456\tBob Jones\tBob\tbob@co.com\n",
+                    stderr="",
+                )
+                cache_path = Path(tempfile.mktemp(suffix=".txt"))
+                cache = {}
+                result = resolve_users_via_slackdump(
+                    {"U123", "U456"},
+                    cache,
+                    cache_path,
+                    MagicMock(),
+                )
+                self.assertEqual(result["U123"], "Alice")
+                self.assertEqual(result["U456"], "Bob")
+                cache_path.unlink()
+
+            @patch("subprocess.run")
+            def test_skips_cached_users(self, mock_run):
+                import tempfile
+
+                cache_path = Path(tempfile.mktemp(suffix=".txt"))
+                cache = {"U123": "Alice"}
+                result = resolve_users_via_slackdump(
+                    {"U123"},
+                    cache,
+                    cache_path,
+                    MagicMock(),
+                )
+                self.assertEqual(result["U123"], "Alice")
+                mock_run.assert_not_called()
+                cache_path.unlink(missing_ok=True)
+
+            @patch("subprocess.run")
+            def test_strips_markdown_chars(self, mock_run):
+                import tempfile
+
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout="U123\tAlice *Smith*\tAlice_S\talice@co.com\n",
+                    stderr="",
+                )
+                cache_path = Path(tempfile.mktemp(suffix=".txt"))
+                result = resolve_users_via_slackdump(
+                    {"U123"},
+                    {},
+                    cache_path,
+                    MagicMock(),
+                )
+                self.assertNotIn("*", result.get("U123", ""))
+                self.assertNotIn("_", result.get("U123", ""))
+                cache_path.unlink()
+
+        class TestIsDmChannel(unittest.TestCase):
+            def test_dm_channel(self):
+                self.assertTrue(is_dm_channel("D04GHIJKL"))
+
+            def test_public_channel(self):
+                self.assertFalse(is_dm_channel("C01ABCDEF"))
+
+            def test_empty(self):
+                self.assertFalse(is_dm_channel(""))
+
+        class TestBuildAIPrompt(unittest.TestCase):
+            def test_includes_channel_data(self):
+                channels_data = [
+                    {
+                        "channel_id": "C01ABC",
+                        "name": "general",
+                        "messages": [{"user": "U123", "text": "hello", "ts": "1.0"}],
+                    }
+                ]
+                prompt = build_ai_prompt(channels_data, {"U123": "Alice"}, "", "14h")
+                self.assertIn("general", prompt)
+                self.assertIn("@Alice", prompt)
+                self.assertIn("14h", prompt)
+
+            def test_mentions_section_when_user_id(self):
+                channels_data = [
+                    {
+                        "channel_id": "C01ABC",
+                        "name": "general",
+                        "messages": [{"user": "U123", "text": "hello", "ts": "1.0"}],
+                    }
+                ]
+                prompt = build_ai_prompt(channels_data, {"U789": "Me"}, "U789", "14h")
+                self.assertIn("MENTIONS", prompt)
+                self.assertIn("@Me", prompt)
+
+            def test_no_mentions_section_without_user_id(self):
+                channels_data = [
+                    {
+                        "channel_id": "C01ABC",
+                        "name": "general",
+                        "messages": [{"user": "U123", "text": "hello", "ts": "1.0"}],
+                    }
+                ]
+                prompt = build_ai_prompt(channels_data, {}, "", "14h")
+                self.assertNotIn("MENTIONS", prompt)
+
+            def test_resolves_user_mentions_in_text(self):
+                channels_data = [
+                    {
+                        "channel_id": "C01ABC",
+                        "name": "general",
+                        "messages": [{"user": "U123", "text": "hey <@U456> check this", "ts": "1.0"}],
+                    }
+                ]
+                prompt = build_ai_prompt(channels_data, {"U123": "Alice", "U456": "Bob"}, "", "14h")
+                self.assertIn("@Bob", prompt)
+                self.assertNotIn("<@U456>", prompt)
+
+            def test_dm_channel_type(self):
+                channels_data = [
+                    {
+                        "channel_id": "D01ABC",
+                        "name": "",
+                        "messages": [{"user": "U123", "text": "private msg", "ts": "1.0"}],
+                    }
+                ]
+                prompt = build_ai_prompt(channels_data, {}, "", "14h")
+                self.assertIn('"type": "DM"', prompt)
+
+        class TestTruncateMessage(unittest.TestCase):
+            def test_short_message(self):
+                self.assertEqual(truncate_message("hello", 4000), "hello")
+
+            def test_long_message(self):
+                msg = "a" * 5000
+                result = truncate_message(msg, 4000)
+                self.assertLessEqual(len(result), 4000)
+                self.assertIn("truncated", result)
+
+            def test_truncates_at_newline(self):
+                msg = "line1\n" * 800
+                result = truncate_message(msg, 100)
+                self.assertLessEqual(len(result), 100)
+
+        class TestFormatWarnings(unittest.TestCase):
+            def test_no_warnings(self):
+                self.assertEqual(format_warnings([]), "")
+
+            def test_single_warning(self):
+                result = format_warnings(["dump failed for C01"])
+                self.assertIn("Note:", result)
+                self.assertIn("dump failed for C01", result)
+
+            def test_multiple_warnings(self):
+                result = format_warnings(["dump failed", "parse error"])
+                self.assertIn("; ", result)
+
+        class TestRunSummary(unittest.TestCase):
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "call_ai", return_value="*Slack Summary*\n\nActive discussion in #general.")
+            @patch.object(_mod, "resolve_users_via_slackdump", return_value={"U123": "Alice"})
+            @patch.object(_mod, "load_user_cache", return_value={})
+            @patch.object(_mod, "get_user_cache_path")
+            @patch.object(_mod, "parse_channel_messages")
+            @patch.object(_mod, "dump_all_channels")
+            @patch.object(_mod, "validate_auth_with_retries", return_value=True)
+            @patch.object(_mod, "setup_logging")
+            def test_full_flow(
+                self,
+                mock_logging,
+                mock_auth,
+                mock_dump,
+                mock_parse,
+                mock_cache_path,
+                mock_load_cache,
+                mock_resolve,
+                mock_ai,
+                mock_tg,
+            ):
+                import tempfile
+
+                # Setup logging mock
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                # Setup cache path mock
+                mock_cache_path.return_value = Path(tempfile.mktemp(suffix=".txt"))
+
+                # Write config
+                config_dir = tempfile.mkdtemp()
+                config_path = Path(config_dir) / "config.yaml"
+                config = {
+                    "hostname": "testhost",
+                    "channels": ["C01ABC"],
+                    "timeframe": "14h",
+                    "user_id": "U789",
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                # Mock dump results
+                mock_dump.return_value = ({"C01ABC": "/tmp/C01ABC.json"}, [])
+
+                # Mock parse results
+                mock_parse.return_value = (
+                    {"channel_id": "C01ABC", "name": "general"},
+                    [{"user": "U123", "text": "hello world", "ts": "1.0"}],
+                    "",
+                )
+
+                run_summary(config_path)
+
+                mock_auth.assert_called_once()
+                mock_dump.assert_called_once()
+                mock_ai.assert_called_once()
+                mock_tg.assert_called()
+
+                mock_log_file.unlink(missing_ok=True)
+                mock_cache_path.return_value.unlink(missing_ok=True)
+                shutil.rmtree(config_dir)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "setup_logging")
+            def test_missing_config(self, mock_logging, mock_tg):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                run_summary(Path("/nonexistent/config.yaml"))
+
+                mock_logger.error.assert_called()
+                mock_tg.assert_called_once()
+                self.assertIn("FATAL", mock_tg.call_args[0][0])
+                mock_log_file.unlink(missing_ok=True)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "validate_auth_with_retries", return_value=False)
+            @patch.object(_mod, "setup_logging")
+            def test_auth_failure_stops(self, mock_logging, mock_auth, mock_tg):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                config_dir = tempfile.mkdtemp()
+                config_path = Path(config_dir) / "config.yaml"
+                config = {
+                    "hostname": "testhost",
+                    "channels": ["C01ABC"],
+                    "timeframe": "14h",
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                run_summary(config_path)
+
+                # Auth failed — should not proceed to dump
+                mock_auth.assert_called_once()
+
+                mock_log_file.unlink(missing_ok=True)
+                shutil.rmtree(config_dir)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "dump_all_channels", return_value=({}, ["Failed to dump C01ABC"]))
+            @patch.object(_mod, "validate_auth_with_retries", return_value=True)
+            @patch.object(_mod, "setup_logging")
+            def test_all_dumps_failed(self, mock_logging, mock_auth, mock_dump, mock_tg):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                config_dir = tempfile.mkdtemp()
+                config_path = Path(config_dir) / "config.yaml"
+                config = {
+                    "hostname": "testhost",
+                    "channels": ["C01ABC"],
+                    "timeframe": "14h",
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                run_summary(config_path)
+
+                # Should send FATAL
+                fatal_calls = [c for c in mock_tg.call_args_list if "FATAL" in str(c)]
+                self.assertGreater(len(fatal_calls), 0)
+
+                mock_log_file.unlink(missing_ok=True)
+                shutil.rmtree(config_dir)
+
+        class TestDumpChannel(unittest.TestCase):
+            @patch("subprocess.run")
+            def test_success(self, mock_run):
+                import tempfile
+
+                dump_dir = Path(tempfile.mkdtemp())
+                json_file = dump_dir / "C01ABC.json"
+                json_file.write_text('{"messages": []}')
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+                result = dump_channel("C01ABC", "2026-04-01T00:00:00", dump_dir, MagicMock())
+                self.assertIsNotNone(result)
+                shutil.rmtree(dump_dir)
+
+            @patch("subprocess.run")
+            def test_failure(self, mock_run):
+                import tempfile
+
+                dump_dir = Path(tempfile.mkdtemp())
+                mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
+
+                result = dump_channel("C01ABC", "2026-04-01T00:00:00", dump_dir, MagicMock())
+                self.assertIsNone(result)
+                shutil.rmtree(dump_dir)
+
+        class TestDumpAllChannels(unittest.TestCase):
+            @patch.object(_mod, "dump_channel")
+            def test_dumps_all_with_delay(self, mock_dump):
+                import tempfile
+
+                dump_dir = Path(tempfile.mkdtemp())
+                mock_dump.return_value = str(dump_dir / "C01.json")
+                sleep_calls = []
+
+                files, warnings = dump_all_channels(
+                    ["C01", "C02"],
+                    "2026-04-01T00:00:00",
+                    dump_dir,
+                    MagicMock(),
+                    sleep_fn=lambda s: sleep_calls.append(s),
+                )
+                self.assertEqual(len(files), 2)
+                self.assertEqual(len(warnings), 0)
+                self.assertEqual(len(sleep_calls), 1)  # sleep between channels
+                shutil.rmtree(dump_dir)
+
+            @patch.object(_mod, "dump_channel")
+            def test_collects_warnings_on_failure(self, mock_dump):
+                import tempfile
+
+                dump_dir = Path(tempfile.mkdtemp())
+                mock_dump.return_value = None
+
+                files, warnings = dump_all_channels(
+                    ["C01"],
+                    "2026-04-01T00:00:00",
+                    dump_dir,
+                    MagicMock(),
+                    sleep_fn=lambda _: None,
+                )
+                self.assertEqual(len(files), 0)
+                self.assertEqual(len(warnings), 1)
+                shutil.rmtree(dump_dir)
+
         unittest.main(argv=[sys.argv[0]], exit=True)
     else:
         main()

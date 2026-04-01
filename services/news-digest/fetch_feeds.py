@@ -123,7 +123,7 @@ def parse_atom_entries(root: ET.Element) -> list[dict]:
 def parse_feed(xml_bytes: bytes) -> list[dict]:
     """Parse an RSS or Atom feed from raw XML bytes into item dicts."""
     # Reject XML with DTD declarations to prevent XML bomb / XXE attacks
-    upper = xml_bytes[:4096].upper()
+    upper = xml_bytes.upper()
     if b"<!DOCTYPE" in upper or b"<!ENTITY" in upper:
         raise ET.ParseError("DTD/entity declarations are not allowed in feeds")
     root = ET.fromstring(xml_bytes)

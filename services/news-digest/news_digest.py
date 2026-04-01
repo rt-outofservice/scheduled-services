@@ -23,9 +23,7 @@ import re
 import sys
 import time
 import unicodedata
-import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -406,447 +404,439 @@ def main() -> None:
     run_digest(config_path, digest_names)
 
 
-# ---------- Tests (run with: uv run python services/news-digest/news_digest.py --tests) ----------
-
-_mod = sys.modules[__name__]
-
-
-class TestLoadConfig(unittest.TestCase):
-    def test_valid_config(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test", "feeds": {"g1": {"lang": "en"}}}, f)
-            f.flush()
-            config = load_config(Path(f.name))
-        self.assertEqual(config["hostname"], "test")
-        self.assertIn("g1", config["feeds"])
-        Path(f.name).unlink()
-
-    def test_missing_config(self):
-        with self.assertRaises(FileNotFoundError):
-            load_config(Path("/nonexistent/config.yaml"))
-
-    def test_missing_feeds_key(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test"}, f)
-            f.flush()
-            with self.assertRaises(ValueError):
-                load_config(Path(f.name))
-        Path(f.name).unlink()
-
-
-class TestFilterGroupsByNames(unittest.TestCase):
-    def setUp(self):
-        self.config = {
-            "feeds": {
-                "tech": {"lang": "en"},
-                "security": {"lang": "en"},
-                "finance": {"lang": "ru"},
-            }
-        }
-
-    def test_no_filter_returns_all(self):
-        result = filter_groups_by_names(self.config, None)
-        self.assertEqual(len(result), 3)
-
-    def test_filter_single(self):
-        result = filter_groups_by_names(self.config, ["tech"])
-        self.assertEqual(len(result), 1)
-        self.assertIn("tech", result)
-
-    def test_filter_multiple(self):
-        result = filter_groups_by_names(self.config, ["tech", "security"])
-        self.assertEqual(len(result), 2)
-
-    def test_filter_nonexistent(self):
-        result = filter_groups_by_names(self.config, ["nonexistent"])
-        self.assertEqual(len(result), 0)
-
-    def test_filter_with_spaces(self):
-        result = filter_groups_by_names(self.config, [" tech "])
-        self.assertEqual(len(result), 1)
-
-
-class TestNormalizeHeadline(unittest.TestCase):
-    def test_basic(self):
-        self.assertEqual(normalize_headline("Hello World"), "hello world")
-
-    def test_special_chars(self):
-        self.assertEqual(normalize_headline("Hello, World!"), "hello world")
-
-    def test_accents(self):
-        self.assertEqual(normalize_headline("cafe\u0301"), "cafe")
-
-    def test_extra_spaces(self):
-        self.assertEqual(normalize_headline("  hello   world  "), "hello world")
-
-    def test_empty(self):
-        self.assertEqual(normalize_headline(""), "")
-
-
-class TestExtractSentHeadlines(unittest.TestCase):
-    def test_extracts_headlines(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
-            f.write("2026-04-01 10:00:00 [INFO] SENT_HEADLINE: Big News Today\n")
-            f.write("2026-04-01 10:00:01 [INFO] SENT_HEADLINE: Another Story\n")
-            f.write("2026-04-01 10:00:02 [INFO] Processing group: tech\n")
-            f.flush()
-            result = extract_sent_headlines(Path(f.name))
-        self.assertEqual(len(result), 2)
-        self.assertIn(normalize_headline("Big News Today"), result)
-        self.assertIn(normalize_headline("Another Story"), result)
-        Path(f.name).unlink()
-
-    def test_missing_file(self):
-        result = extract_sent_headlines(Path("/nonexistent.log"))
-        self.assertEqual(len(result), 0)
-
-
-class TestDedupItems(unittest.TestCase):
-    def test_removes_duplicates(self):
-        items = [
-            {"title": "Big News Today"},
-            {"title": "Something New"},
-        ]
-        sent = {normalize_headline("Big News Today")}
-        result = dedup_items(items, sent)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["title"], "Something New")
-
-    def test_no_duplicates(self):
-        items = [{"title": "Fresh Story"}]
-        sent = {normalize_headline("Old Story")}
-        result = dedup_items(items, sent)
-        self.assertEqual(len(result), 1)
-
-    def test_empty_title_excluded(self):
-        items = [{"title": ""}]
-        result = dedup_items(items, set())
-        self.assertEqual(len(result), 0)
-
-
-class TestShortenUrl(unittest.TestCase):
-    @patch.object(_mod, "urlopen")
-    def test_success(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({"short_url": "https://spoo.me/abc"}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
-        short, err = shorten_url("https://example.com/long")
-        self.assertEqual(short, "https://spoo.me/abc")
-        self.assertIsNone(err)
-
-    @patch.object(_mod, "urlopen")
-    def test_api_error(self, mock_urlopen):
-        mock_urlopen.side_effect = URLError("timeout")
-        short, err = shorten_url("https://example.com/long")
-        self.assertEqual(short, "https://example.com/long")
-        self.assertIsNotNone(err)
-
-    @patch.object(_mod, "urlopen")
-    def test_no_short_url_in_response(self, mock_urlopen):
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps({}).encode()
-        mock_resp.__enter__ = lambda s: s
-        mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
-
-        short, err = shorten_url("https://example.com/long")
-        self.assertEqual(short, "https://example.com/long")
-        self.assertIn("no short_url", err)
-
-
-class TestShortenUrlsInItems(unittest.TestCase):
-    @patch.object(_mod, "shorten_url")
-    def test_shortens_all(self, mock_shorten):
-        mock_shorten.return_value = ("https://short.url/x", None)
-        items = [{"link": "https://example.com/1"}, {"link": "https://example.com/2"}]
-        warnings = []
-        shorten_urls_in_items(items, warnings)
-        self.assertEqual(items[0]["short_link"], "https://short.url/x")
-        self.assertEqual(items[1]["short_link"], "https://short.url/x")
-        self.assertEqual(len(warnings), 0)
-
-    @patch.object(_mod, "shorten_url")
-    def test_collects_warnings(self, mock_shorten):
-        mock_shorten.return_value = ("https://example.com/1", "timeout")
-        items = [{"link": "https://example.com/1"}]
-        warnings = []
-        shorten_urls_in_items(items, warnings)
-        self.assertEqual(items[0]["short_link"], "https://example.com/1")
-        self.assertEqual(len(warnings), 1)
-
-    @patch.object(_mod, "shorten_url")
-    def test_empty_link_skipped(self, mock_shorten):
-        items = [{"link": ""}]
-        warnings = []
-        shorten_urls_in_items(items, warnings)
-        self.assertEqual(items[0]["short_link"], "")
-        mock_shorten.assert_not_called()
-
-
-class TestBuildAIPrompt(unittest.TestCase):
-    def test_detailed_mode(self):
-        group_config = {"lang": "en", "mode": "detailed"}
-        feeds_data = {
-            "feeds": {
-                "HN": {
-                    "items": [{"title": "Story", "link": "https://x.com", "short_link": "https://s.co/x"}],
-                    "error": None,
-                }
-            }
-        }
-        prompt = build_ai_prompt("tech", group_config, feeds_data)
-        self.assertIn("DETAILED", prompt)
-        self.assertIn("Language: en", prompt)
-        self.assertIn("Story", prompt)
-
-    def test_summary_mode_with_subcategories(self):
-        group_config = {
-            "lang": "ru",
-            "mode": "summary",
-            "subcategories": {"Cloud": ["HN"]},
-        }
-        feeds_data = {
-            "feeds": {
-                "HN": {
-                    "items": [{"title": "Story", "link": "https://x.com"}],
-                    "error": None,
-                }
-            }
-        }
-        prompt = build_ai_prompt("tech", group_config, feeds_data)
-        self.assertIn("SUMMARY", prompt)
-        self.assertIn("Language: ru", prompt)
-        self.assertIn("Cloud", prompt)
-
-    def test_empty_items_returns_empty(self):
-        group_config = {"lang": "en", "mode": "detailed"}
-        feeds_data = {"feeds": {"HN": {"items": [], "error": None}}}
-        prompt = build_ai_prompt("tech", group_config, feeds_data)
-        self.assertEqual(prompt, "")
-
-    def test_errored_feeds_skipped(self):
-        group_config = {"lang": "en", "mode": "detailed"}
-        feeds_data = {"feeds": {"HN": {"items": [], "error": "fetch error"}}}
-        prompt = build_ai_prompt("tech", group_config, feeds_data)
-        self.assertEqual(prompt, "")
-
-
-class TestTruncateMessage(unittest.TestCase):
-    def test_short_message(self):
-        self.assertEqual(truncate_message("hello", 4000), "hello")
-
-    def test_long_message_truncated(self):
-        msg = "a" * 5000
-        result = truncate_message(msg, 4000)
-        self.assertLessEqual(len(result), 4000)
-        self.assertIn("truncated", result)
-
-    def test_truncates_at_newline(self):
-        msg = "line1\n" * 800
-        result = truncate_message(msg, 100)
-        self.assertLessEqual(len(result), 100)
-        self.assertIn("truncated", result)
-
-
-class TestFormatWarnings(unittest.TestCase):
-    def test_no_warnings(self):
-        self.assertEqual(format_warnings([]), "")
-
-    def test_single_warning(self):
-        result = format_warnings(["2 feeds unavailable"])
-        self.assertIn("Note:", result)
-        self.assertIn("2 feeds unavailable", result)
-
-    def test_multiple_warnings(self):
-        result = format_warnings(["2 feeds unavailable", "URL shortener failed for 3 links"])
-        self.assertIn("; ", result)
-
-
-class TestRunDigest(unittest.TestCase):
-    """Integration tests for the main run_digest flow."""
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "call_ai", return_value="*Tech Digest*\n\nStory about testing.")
-    @patch("fetch_feeds.fetch_all")
-    @patch.object(_mod, "setup_logging")
-    def test_full_flow(self, mock_logging, mock_fetch, mock_ai, mock_telegram):
-        import tempfile
-
-        # Set up mock logging
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        # Write config
-        config_dir = tempfile.mkdtemp()
-        config_path = Path(config_dir) / "config.yaml"
-        config = {
-            "hostname": "testhost",
-            "feeds": {
-                "tech": {
-                    "lang": "en",
-                    "mode": "summary",
-                    "hours": 24,
-                    "feeds": [{"name": "HN", "url": "https://example.com/rss"}],
-                }
-            },
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        # Mock fetch_all result
-        mock_fetch.return_value = {
-            "tech": {
-                "feeds": {
-                    "HN": {
-                        "items": [{"title": "Test Story", "link": "https://x.com", "date": "2026-04-01T10:00:00Z"}],
-                        "error": None,
-                    }
-                }
-            }
-        }
-
-        run_digest(config_path)
-
-        mock_ai.assert_called_once()
-        mock_telegram.assert_called()
-        # Check headline was logged
-        mock_logger.info.assert_any_call("SENT_HEADLINE: Test Story")
-
-        mock_log_file.unlink(missing_ok=True)
-        import shutil
-
-        shutil.rmtree(config_dir)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "setup_logging")
-    def test_missing_config(self, mock_logging, mock_telegram):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        run_digest(Path("/nonexistent/config.yaml"))
-
-        mock_logger.error.assert_called()
-        mock_telegram.assert_called_once()
-        self.assertIn("FATAL", mock_telegram.call_args[0][0])
-        mock_log_file.unlink(missing_ok=True)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "call_ai", return_value="Digest text")
-    @patch("fetch_feeds.fetch_all")
-    @patch.object(_mod, "setup_logging")
-    def test_digest_names_filtering(self, mock_logging, mock_fetch, mock_ai, mock_telegram):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        config_dir = tempfile.mkdtemp()
-        config_path = Path(config_dir) / "config.yaml"
-        config = {
-            "hostname": "testhost",
-            "feeds": {
-                "tech": {
-                    "lang": "en",
-                    "mode": "summary",
-                    "hours": 24,
-                    "feeds": [{"name": "HN", "url": "https://example.com/rss"}],
-                },
-                "security": {
-                    "lang": "en",
-                    "mode": "detailed",
-                    "hours": 12,
-                    "feeds": [{"name": "Sec", "url": "https://example.com/sec"}],
-                },
-            },
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        mock_fetch.return_value = {
-            "tech": {
-                "feeds": {
-                    "HN": {
-                        "items": [{"title": "Tech Story", "link": "https://x.com", "date": "2026-04-01T10:00:00Z"}],
-                        "error": None,
-                    }
-                }
-            }
-        }
-
-        run_digest(config_path, digest_names=["tech"])
-
-        # Only tech group processed
-        mock_fetch.assert_called_once()
-        call_args = mock_fetch.call_args[0][0]
-        self.assertIn("tech", call_args)
-        self.assertNotIn("security", call_args)
-
-        mock_log_file.unlink(missing_ok=True)
-        import shutil
-
-        shutil.rmtree(config_dir)
-
-    @patch.object(_mod, "send_telegram")
-    @patch("fetch_feeds.fetch_all")
-    @patch.object(_mod, "setup_logging")
-    def test_all_feeds_failed_sends_fatal(self, mock_logging, mock_fetch, mock_telegram):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log_file = Path(tempfile.mktemp(suffix=".log"))
-        mock_log_file.write_text("")
-        mock_logging.return_value = (mock_logger, mock_log_file)
-
-        config_dir = tempfile.mkdtemp()
-        config_path = Path(config_dir) / "config.yaml"
-        config = {
-            "hostname": "testhost",
-            "feeds": {
-                "tech": {
-                    "lang": "en",
-                    "mode": "summary",
-                    "hours": 24,
-                    "feeds": [{"name": "HN", "url": "https://example.com/rss"}],
-                }
-            },
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        mock_fetch.return_value = {"tech": {"feeds": {"HN": {"items": [], "error": "connection refused"}}}}
-
-        run_digest(config_path)
-
-        # Should send FATAL telegram
-        fatal_calls = [c for c in mock_telegram.call_args_list if "FATAL" in str(c)]
-        self.assertGreater(len(fatal_calls), 0)
-
-        mock_log_file.unlink(missing_ok=True)
-        import shutil
-
-        shutil.rmtree(config_dir)
-
-
 if __name__ == "__main__":
     if "--tests" in sys.argv:
-        # Prevent setup_logging from redirecting stdout during tests
+        import unittest
+        from unittest.mock import MagicMock, patch
+
+        _mod = sys.modules[__name__]
+
+        class TestLoadConfig(unittest.TestCase):
+            def test_valid_config(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test", "feeds": {"g1": {"lang": "en"}}}, f)
+                    f.flush()
+                    config = load_config(Path(f.name))
+                self.assertEqual(config["hostname"], "test")
+                self.assertIn("g1", config["feeds"])
+                Path(f.name).unlink()
+
+            def test_missing_config(self):
+                with self.assertRaises(FileNotFoundError):
+                    load_config(Path("/nonexistent/config.yaml"))
+
+            def test_missing_feeds_key(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test"}, f)
+                    f.flush()
+                    with self.assertRaises(ValueError):
+                        load_config(Path(f.name))
+                Path(f.name).unlink()
+
+        class TestFilterGroupsByNames(unittest.TestCase):
+            def setUp(self):
+                self.config = {
+                    "feeds": {
+                        "tech": {"lang": "en"},
+                        "security": {"lang": "en"},
+                        "finance": {"lang": "ru"},
+                    }
+                }
+
+            def test_no_filter_returns_all(self):
+                result = filter_groups_by_names(self.config, None)
+                self.assertEqual(len(result), 3)
+
+            def test_filter_single(self):
+                result = filter_groups_by_names(self.config, ["tech"])
+                self.assertEqual(len(result), 1)
+                self.assertIn("tech", result)
+
+            def test_filter_multiple(self):
+                result = filter_groups_by_names(self.config, ["tech", "security"])
+                self.assertEqual(len(result), 2)
+
+            def test_filter_nonexistent(self):
+                result = filter_groups_by_names(self.config, ["nonexistent"])
+                self.assertEqual(len(result), 0)
+
+            def test_filter_with_spaces(self):
+                result = filter_groups_by_names(self.config, [" tech "])
+                self.assertEqual(len(result), 1)
+
+        class TestNormalizeHeadline(unittest.TestCase):
+            def test_basic(self):
+                self.assertEqual(normalize_headline("Hello World"), "hello world")
+
+            def test_special_chars(self):
+                self.assertEqual(normalize_headline("Hello, World!"), "hello world")
+
+            def test_accents(self):
+                self.assertEqual(normalize_headline("cafe\u0301"), "cafe")
+
+            def test_extra_spaces(self):
+                self.assertEqual(normalize_headline("  hello   world  "), "hello world")
+
+            def test_empty(self):
+                self.assertEqual(normalize_headline(""), "")
+
+        class TestExtractSentHeadlines(unittest.TestCase):
+            def test_extracts_headlines(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as f:
+                    f.write("2026-04-01 10:00:00 [INFO] SENT_HEADLINE: Big News Today\n")
+                    f.write("2026-04-01 10:00:01 [INFO] SENT_HEADLINE: Another Story\n")
+                    f.write("2026-04-01 10:00:02 [INFO] Processing group: tech\n")
+                    f.flush()
+                    result = extract_sent_headlines(Path(f.name))
+                self.assertEqual(len(result), 2)
+                self.assertIn(normalize_headline("Big News Today"), result)
+                self.assertIn(normalize_headline("Another Story"), result)
+                Path(f.name).unlink()
+
+            def test_missing_file(self):
+                result = extract_sent_headlines(Path("/nonexistent.log"))
+                self.assertEqual(len(result), 0)
+
+        class TestDedupItems(unittest.TestCase):
+            def test_removes_duplicates(self):
+                items = [
+                    {"title": "Big News Today"},
+                    {"title": "Something New"},
+                ]
+                sent = {normalize_headline("Big News Today")}
+                result = dedup_items(items, sent)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["title"], "Something New")
+
+            def test_no_duplicates(self):
+                items = [{"title": "Fresh Story"}]
+                sent = {normalize_headline("Old Story")}
+                result = dedup_items(items, sent)
+                self.assertEqual(len(result), 1)
+
+            def test_empty_title_excluded(self):
+                items = [{"title": ""}]
+                result = dedup_items(items, set())
+                self.assertEqual(len(result), 0)
+
+        class TestShortenUrl(unittest.TestCase):
+            @patch.object(_mod, "urlopen")
+            def test_success(self, mock_urlopen):
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps({"short_url": "https://spoo.me/abc"}).encode()
+                mock_resp.__enter__ = lambda s: s
+                mock_resp.__exit__ = MagicMock(return_value=False)
+                mock_urlopen.return_value = mock_resp
+
+                short, err = shorten_url("https://example.com/long")
+                self.assertEqual(short, "https://spoo.me/abc")
+                self.assertIsNone(err)
+
+            @patch.object(_mod, "urlopen")
+            def test_api_error(self, mock_urlopen):
+                mock_urlopen.side_effect = URLError("timeout")
+                short, err = shorten_url("https://example.com/long")
+                self.assertEqual(short, "https://example.com/long")
+                self.assertIsNotNone(err)
+
+            @patch.object(_mod, "urlopen")
+            def test_no_short_url_in_response(self, mock_urlopen):
+                mock_resp = MagicMock()
+                mock_resp.read.return_value = json.dumps({}).encode()
+                mock_resp.__enter__ = lambda s: s
+                mock_resp.__exit__ = MagicMock(return_value=False)
+                mock_urlopen.return_value = mock_resp
+
+                short, err = shorten_url("https://example.com/long")
+                self.assertEqual(short, "https://example.com/long")
+                self.assertIn("no short_url", err)
+
+        class TestShortenUrlsInItems(unittest.TestCase):
+            @patch.object(_mod, "shorten_url")
+            def test_shortens_all(self, mock_shorten):
+                mock_shorten.return_value = ("https://short.url/x", None)
+                items = [{"link": "https://example.com/1"}, {"link": "https://example.com/2"}]
+                warnings = []
+                shorten_urls_in_items(items, warnings)
+                self.assertEqual(items[0]["short_link"], "https://short.url/x")
+                self.assertEqual(items[1]["short_link"], "https://short.url/x")
+                self.assertEqual(len(warnings), 0)
+
+            @patch.object(_mod, "shorten_url")
+            def test_collects_warnings(self, mock_shorten):
+                mock_shorten.return_value = ("https://example.com/1", "timeout")
+                items = [{"link": "https://example.com/1"}]
+                warnings = []
+                shorten_urls_in_items(items, warnings)
+                self.assertEqual(items[0]["short_link"], "https://example.com/1")
+                self.assertEqual(len(warnings), 1)
+
+            @patch.object(_mod, "shorten_url")
+            def test_empty_link_skipped(self, mock_shorten):
+                items = [{"link": ""}]
+                warnings = []
+                shorten_urls_in_items(items, warnings)
+                self.assertEqual(items[0]["short_link"], "")
+                mock_shorten.assert_not_called()
+
+        class TestBuildAIPrompt(unittest.TestCase):
+            def test_detailed_mode(self):
+                group_config = {"lang": "en", "mode": "detailed"}
+                feeds_data = {
+                    "feeds": {
+                        "HN": {
+                            "items": [{"title": "Story", "link": "https://x.com", "short_link": "https://s.co/x"}],
+                            "error": None,
+                        }
+                    }
+                }
+                prompt = build_ai_prompt("tech", group_config, feeds_data)
+                self.assertIn("DETAILED", prompt)
+                self.assertIn("Language: en", prompt)
+                self.assertIn("Story", prompt)
+
+            def test_summary_mode_with_subcategories(self):
+                group_config = {
+                    "lang": "ru",
+                    "mode": "summary",
+                    "subcategories": {"Cloud": ["HN"]},
+                }
+                feeds_data = {
+                    "feeds": {
+                        "HN": {
+                            "items": [{"title": "Story", "link": "https://x.com"}],
+                            "error": None,
+                        }
+                    }
+                }
+                prompt = build_ai_prompt("tech", group_config, feeds_data)
+                self.assertIn("SUMMARY", prompt)
+                self.assertIn("Language: ru", prompt)
+                self.assertIn("Cloud", prompt)
+
+            def test_empty_items_returns_empty(self):
+                group_config = {"lang": "en", "mode": "detailed"}
+                feeds_data = {"feeds": {"HN": {"items": [], "error": None}}}
+                prompt = build_ai_prompt("tech", group_config, feeds_data)
+                self.assertEqual(prompt, "")
+
+            def test_errored_feeds_skipped(self):
+                group_config = {"lang": "en", "mode": "detailed"}
+                feeds_data = {"feeds": {"HN": {"items": [], "error": "fetch error"}}}
+                prompt = build_ai_prompt("tech", group_config, feeds_data)
+                self.assertEqual(prompt, "")
+
+        class TestTruncateMessage(unittest.TestCase):
+            def test_short_message(self):
+                self.assertEqual(truncate_message("hello", 4000), "hello")
+
+            def test_long_message_truncated(self):
+                msg = "a" * 5000
+                result = truncate_message(msg, 4000)
+                self.assertLessEqual(len(result), 4000)
+                self.assertIn("truncated", result)
+
+            def test_truncates_at_newline(self):
+                msg = "line1\n" * 800
+                result = truncate_message(msg, 100)
+                self.assertLessEqual(len(result), 100)
+                self.assertIn("truncated", result)
+
+        class TestFormatWarnings(unittest.TestCase):
+            def test_no_warnings(self):
+                self.assertEqual(format_warnings([]), "")
+
+            def test_single_warning(self):
+                result = format_warnings(["2 feeds unavailable"])
+                self.assertIn("Note:", result)
+                self.assertIn("2 feeds unavailable", result)
+
+            def test_multiple_warnings(self):
+                result = format_warnings(["2 feeds unavailable", "URL shortener failed for 3 links"])
+                self.assertIn("; ", result)
+
+        class TestRunDigest(unittest.TestCase):
+            """Integration tests for the main run_digest flow."""
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "call_ai", return_value="*Tech Digest*\n\nStory about testing.")
+            @patch("fetch_feeds.fetch_all")
+            @patch.object(_mod, "setup_logging")
+            def test_full_flow(self, mock_logging, mock_fetch, mock_ai, mock_telegram):
+                import tempfile
+
+                # Set up mock logging
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                # Write config
+                config_dir = tempfile.mkdtemp()
+                config_path = Path(config_dir) / "config.yaml"
+                config = {
+                    "hostname": "testhost",
+                    "feeds": {
+                        "tech": {
+                            "lang": "en",
+                            "mode": "summary",
+                            "hours": 24,
+                            "feeds": [{"name": "HN", "url": "https://example.com/rss"}],
+                        }
+                    },
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                # Mock fetch_all result
+                mock_fetch.return_value = {
+                    "tech": {
+                        "feeds": {
+                            "HN": {
+                                "items": [
+                                    {"title": "Test Story", "link": "https://x.com", "date": "2026-04-01T10:00:00Z"}
+                                ],
+                                "error": None,
+                            }
+                        }
+                    }
+                }
+
+                run_digest(config_path)
+
+                mock_ai.assert_called_once()
+                mock_telegram.assert_called()
+                # Check headline was logged
+                mock_logger.info.assert_any_call("SENT_HEADLINE: Test Story")
+
+                mock_log_file.unlink(missing_ok=True)
+                import shutil
+
+                shutil.rmtree(config_dir)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "setup_logging")
+            def test_missing_config(self, mock_logging, mock_telegram):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                run_digest(Path("/nonexistent/config.yaml"))
+
+                mock_logger.error.assert_called()
+                mock_telegram.assert_called_once()
+                self.assertIn("FATAL", mock_telegram.call_args[0][0])
+                mock_log_file.unlink(missing_ok=True)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "call_ai", return_value="Digest text")
+            @patch("fetch_feeds.fetch_all")
+            @patch.object(_mod, "setup_logging")
+            def test_digest_names_filtering(self, mock_logging, mock_fetch, mock_ai, mock_telegram):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                config_dir = tempfile.mkdtemp()
+                config_path = Path(config_dir) / "config.yaml"
+                config = {
+                    "hostname": "testhost",
+                    "feeds": {
+                        "tech": {
+                            "lang": "en",
+                            "mode": "summary",
+                            "hours": 24,
+                            "feeds": [{"name": "HN", "url": "https://example.com/rss"}],
+                        },
+                        "security": {
+                            "lang": "en",
+                            "mode": "detailed",
+                            "hours": 12,
+                            "feeds": [{"name": "Sec", "url": "https://example.com/sec"}],
+                        },
+                    },
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                mock_fetch.return_value = {
+                    "tech": {
+                        "feeds": {
+                            "HN": {
+                                "items": [
+                                    {"title": "Tech Story", "link": "https://x.com", "date": "2026-04-01T10:00:00Z"}
+                                ],
+                                "error": None,
+                            }
+                        }
+                    }
+                }
+
+                run_digest(config_path, digest_names=["tech"])
+
+                # Only tech group processed
+                mock_fetch.assert_called_once()
+                call_args = mock_fetch.call_args[0][0]
+                self.assertIn("tech", call_args)
+                self.assertNotIn("security", call_args)
+
+                mock_log_file.unlink(missing_ok=True)
+                import shutil
+
+                shutil.rmtree(config_dir)
+
+            @patch.object(_mod, "send_telegram")
+            @patch("fetch_feeds.fetch_all")
+            @patch.object(_mod, "setup_logging")
+            def test_all_feeds_failed_sends_fatal(self, mock_logging, mock_fetch, mock_telegram):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log_file = Path(tempfile.mktemp(suffix=".log"))
+                mock_log_file.write_text("")
+                mock_logging.return_value = (mock_logger, mock_log_file)
+
+                config_dir = tempfile.mkdtemp()
+                config_path = Path(config_dir) / "config.yaml"
+                config = {
+                    "hostname": "testhost",
+                    "feeds": {
+                        "tech": {
+                            "lang": "en",
+                            "mode": "summary",
+                            "hours": 24,
+                            "feeds": [{"name": "HN", "url": "https://example.com/rss"}],
+                        }
+                    },
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                mock_fetch.return_value = {"tech": {"feeds": {"HN": {"items": [], "error": "connection refused"}}}}
+
+                run_digest(config_path)
+
+                # Should send FATAL telegram
+                fatal_calls = [c for c in mock_telegram.call_args_list if "FATAL" in str(c)]
+                self.assertGreater(len(fatal_calls), 0)
+
+                mock_log_file.unlink(missing_ok=True)
+                import shutil
+
+                shutil.rmtree(config_dir)
+
         unittest.main(argv=[sys.argv[0]], exit=True)
     else:
         main()

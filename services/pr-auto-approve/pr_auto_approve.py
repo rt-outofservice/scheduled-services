@@ -25,10 +25,8 @@ import json
 import logging
 import subprocess
 import sys
-import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 from urllib.parse import quote as urlquote
 
 import yaml
@@ -753,728 +751,771 @@ def main() -> None:
         run_review(config_path)
 
 
-# ---------- Tests (run with: uv run python services/pr-auto-approve/pr_auto_approve.py --tests) ----------
-
-_mod = sys.modules[__name__]
-
-
-class TestLoadConfig(unittest.TestCase):
-    def test_valid_config(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test", "targets": [{"provider": "github", "org": "myorg"}]}, f)
-            f.flush()
-            config = load_config(Path(f.name))
-        self.assertEqual(config["hostname"], "test")
-        self.assertEqual(len(config["targets"]), 1)
-        Path(f.name).unlink()
-
-    def test_missing_config(self):
-        with self.assertRaises(FileNotFoundError):
-            load_config(Path("/nonexistent/config.yaml"))
-
-    def test_missing_targets_key(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test"}, f)
-            f.flush()
-            with self.assertRaises(ValueError):
-                load_config(Path(f.name))
-        Path(f.name).unlink()
-
-    def test_empty_targets(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-            yaml.dump({"hostname": "test", "targets": []}, f)
-            f.flush()
-            with self.assertRaises(ValueError):
-                load_config(Path(f.name))
-        Path(f.name).unlink()
-
-
-class TestDiscoverRepos(unittest.TestCase):
-    @patch.object(_mod, "_run_cmd")
-    def test_github_rest_api(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="org/repo1\norg/repo2\norg/repo3\n")
-        logger = MagicMock()
-        repos = _discover_github_repos("org", {}, logger)
-        self.assertEqual(repos, ["org/repo1", "org/repo2", "org/repo3"])
-
-    @patch.object(_mod, "_run_cmd")
-    def test_github_fallback_to_search(self, mock_run):
-        # First call (REST) fails, second call (search) succeeds
-        mock_run.side_effect = [
-            MagicMock(returncode=1, stdout="", stderr="not found"),
-            MagicMock(returncode=0, stdout="org/repo-a\n"),
-        ]
-        logger = MagicMock()
-        repos = _discover_github_repos("org", {}, logger)
-        self.assertEqual(repos, ["org/repo-a"])
-        self.assertEqual(mock_run.call_count, 2)
-
-    @patch.object(_mod, "_run_cmd")
-    def test_gitlab_repos(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=json.dumps(
-                [
-                    {"path_with_namespace": "group/proj1"},
-                    {"path_with_namespace": "group/proj2"},
-                ]
-            ),
-        )
-        logger = MagicMock()
-        repos = _discover_gitlab_repos("group", {}, logger)
-        self.assertEqual(repos, ["group/proj1", "group/proj2"])
-
-    def test_filter_include_only(self):
-        repos = ["org/infra-core", "org/infra-tools", "org/webapp"]
-        result = _filter_repos(repos, include_only=["infra-"], exclude=[])
-        self.assertEqual(result, ["org/infra-core", "org/infra-tools"])
-
-    def test_filter_exclude(self):
-        repos = ["org/infra-core", "org/archived-stuff", "org/webapp"]
-        result = _filter_repos(repos, include_only=[], exclude=["archived-"])
-        self.assertEqual(result, ["org/infra-core", "org/webapp"])
-
-    def test_filter_combined(self):
-        repos = ["org/infra-core", "org/infra-old", "org/webapp"]
-        result = _filter_repos(repos, include_only=["infra-"], exclude=["old"])
-        self.assertEqual(result, ["org/infra-core"])
-
-    @patch.object(_mod, "_discover_github_repos")
-    def test_discover_repos_limits_to_5(self, mock_discover):
-        mock_discover.return_value = [f"org/repo{i}" for i in range(10)]
-        logger = MagicMock()
-        target = {"provider": "github", "org": "org"}
-        repos = discover_repos(target, {}, logger)
-        self.assertEqual(len(repos), 5)
-
-
-def _gh_pr(num, title, login, draft=False, adds=5, dels=3, files=2):
-    """Helper to build a GitHub PR JSON object for tests."""
-    return {
-        "number": num,
-        "title": title,
-        "author": {"login": login},
-        "isDraft": draft,
-        "additions": adds,
-        "deletions": dels,
-        "changedFiles": files,
-    }
-
-
-class TestListPrs(unittest.TestCase):
-    @patch.object(_mod, "_run_cmd")
-    def test_github_filters_drafts(self, mock_run):
-        prs_json = json.dumps(
-            [
-                _gh_pr(1, "PR1", "user1"),
-                _gh_pr(2, "Draft", "user2", draft=True, adds=0, dels=0, files=0),
-            ]
-        )
-        mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
-        logger = MagicMock()
-        result = _list_github_prs("org/repo", "me", True, {}, logger)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["number"], 1)
-
-    @patch.object(_mod, "_run_cmd")
-    def test_github_filters_own(self, mock_run):
-        prs_json = json.dumps(
-            [
-                _gh_pr(1, "Own PR", "me"),
-                _gh_pr(2, "Other PR", "other"),
-            ]
-        )
-        mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
-        logger = MagicMock()
-        result = _list_github_prs("org/repo", "me", True, {}, logger)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["author"], "other")
-
-    @patch.object(_mod, "_run_cmd")
-    def test_github_filters_bots(self, mock_run):
-        prs_json = json.dumps(
-            [
-                _gh_pr(1, "Bot PR", "dependabot[bot]"),
-                _gh_pr(2, "Human PR", "dev"),
-            ]
-        )
-        mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
-        logger = MagicMock()
-        result = _list_github_prs("org/repo", "me", True, {}, logger)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["author"], "dev")
-
-    @patch.object(_mod, "_run_cmd")
-    def test_github_keeps_bots_when_skip_false(self, mock_run):
-        prs_json = json.dumps([_gh_pr(1, "Bot PR", "dependabot[bot]")])
-        mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
-        logger = MagicMock()
-        result = _list_github_prs("org/repo", "me", False, {}, logger)
-        self.assertEqual(len(result), 1)
-
-    @patch.object(_mod, "_run_cmd")
-    def test_gitlab_filters_drafts_and_own(self, mock_run):
-        mrs_json = json.dumps(
-            [
-                {"iid": 1, "title": "MR1", "author": {"username": "user1"}, "draft": False, "work_in_progress": False},
-                {"iid": 2, "title": "Draft", "author": {"username": "user2"}, "draft": True, "work_in_progress": False},
-                {"iid": 3, "title": "Own", "author": {"username": "me"}, "draft": False, "work_in_progress": False},
-            ]
-        )
-        mock_run.return_value = MagicMock(returncode=0, stdout=mrs_json)
-        logger = MagicMock()
-        result = _list_gitlab_mrs("group/proj", "me", True, {}, logger)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["number"], 1)
-
-
-class TestComplexityGate(unittest.TestCase):
-    def test_github_within_limits(self):
-        pr_data = {"changed_files": 3, "additions": 50, "deletions": 30}
-        logger = MagicMock()
-        within, files, lines = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
-        self.assertTrue(within)
-        self.assertEqual(files, 3)
-        self.assertEqual(lines, 80)
-
-    def test_github_too_many_files(self):
-        pr_data = {"changed_files": 10, "additions": 50, "deletions": 30}
-        logger = MagicMock()
-        within, files, lines = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
-        self.assertFalse(within)
-
-    def test_github_too_many_lines(self):
-        pr_data = {"changed_files": 2, "additions": 200, "deletions": 200}
-        logger = MagicMock()
-        within, files, lines = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
-        self.assertFalse(within)
-
-    @patch.object(_mod, "_fetch_gitlab_mr_stats", return_value=(3, 50))
-    def test_gitlab_fetches_stats(self, mock_fetch):
-        pr_data = {"changed_files": 0, "additions": 0, "deletions": 0}
-        logger = MagicMock()
-        within, files, lines = check_complexity(pr_data, "group/proj", 1, "gitlab", {}, logger)
-        self.assertTrue(within)
-        self.assertEqual(files, 3)
-        self.assertEqual(lines, 50)
-        mock_fetch.assert_called_once()
-
-    @patch.object(_mod, "_fetch_gitlab_mr_stats", return_value=(10, 500))
-    def test_gitlab_over_limits(self, mock_fetch):
-        pr_data = {"changed_files": 0, "additions": 0, "deletions": 0}
-        logger = MagicMock()
-        within, files, lines = check_complexity(pr_data, "group/proj", 1, "gitlab", {}, logger)
-        self.assertFalse(within)
-
-    def test_boundary_at_limits(self):
-        pr_data = {"changed_files": MAX_FILES, "additions": MAX_LINES, "deletions": 0}
-        logger = MagicMock()
-        within, _, _ = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
-        self.assertTrue(within)
-
-    def test_boundary_just_over(self):
-        pr_data = {"changed_files": MAX_FILES + 1, "additions": 0, "deletions": 0}
-        logger = MagicMock()
-        within, _, _ = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
-        self.assertFalse(within)
-
-
-class TestApprovalCap(unittest.TestCase):
-    def test_count_approvals(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            today = datetime.now(UTC).strftime("%Y-%m-%d")
-            f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
-            f.write("|------|------|-----|--------|-------|---------|--------|\n")
-            f.write(f"| {today} | org/repo | #1 | dev | Fix | safe | approved |\n")
-            f.write(f"| {today} | org/repo | #2 | dev | Update | too complex | skipped-complexity |\n")
-            f.write(f"| {today} | org/repo | #3 | dev | Add | safe | approved |\n")
-            f.flush()
-            count = count_today_approvals(Path(f.name))
-        self.assertEqual(count, 2)
-        Path(f.name).unlink()
-
-    def test_count_no_file(self):
-        self.assertEqual(count_today_approvals(Path("/nonexistent/reviews.md")), 0)
-
-    def test_count_ignores_other_dates(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
-            f.write("|------|------|-----|--------|-------|---------|--------|\n")
-            f.write("| 2020-01-01 | org/repo | #1 | dev | Old | safe | approved |\n")
-            f.flush()
-            count = count_today_approvals(Path(f.name))
-        self.assertEqual(count, 0)
-        Path(f.name).unlink()
-
-
-class TestReviewLog(unittest.TestCase):
-    def test_creates_file_with_header(self):
-        import tempfile
-
-        tmpdir = tempfile.mkdtemp()
-        reviews_file = Path(tmpdir) / "reviews.md"
-        append_review(reviews_file, "org/repo", 42, "dev", "Fix thing", "looks safe", "approved")
-        content = reviews_file.read_text()
-        self.assertIn("| Date | Repo |", content)
-        self.assertIn("org/repo", content)
-        self.assertIn("#42", content)
-        self.assertIn("approved", content)
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-    def test_appends_to_existing(self):
-        import tempfile
-
-        tmpdir = tempfile.mkdtemp()
-        reviews_file = Path(tmpdir) / "reviews.md"
-        append_review(reviews_file, "org/repo", 1, "dev", "First", "ok", "approved")
-        append_review(reviews_file, "org/repo", 2, "dev", "Second", "ok", "skipped-ai")
-        content = reviews_file.read_text()
-        rows = [x for x in content.splitlines() if x.startswith("|") and "org/repo" in x]
-        self.assertEqual(len(rows), 2)
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-    def test_replaces_pipes_in_title(self):
-        import tempfile
-
-        tmpdir = tempfile.mkdtemp()
-        reviews_file = Path(tmpdir) / "reviews.md"
-        append_review(reviews_file, "org/repo", 1, "dev", "Fix | bar", "ok", "approved")
-        content = reviews_file.read_text()
-        self.assertIn("Fix / bar", content)
-        self.assertNotIn("Fix | bar", content.split("\n")[-2])
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-    def test_truncates_long_title(self):
-        import tempfile
-
-        tmpdir = tempfile.mkdtemp()
-        reviews_file = Path(tmpdir) / "reviews.md"
-        long_title = "A" * 100
-        append_review(reviews_file, "org/repo", 1, "dev", long_title, "ok", "approved")
-        content = reviews_file.read_text()
-        # Title should be truncated to 60 chars
-        lines = content.splitlines()
-        data_line = [x for x in lines if "AAAA" in x][0]
-        title_field = data_line.split("|")[5].strip()
-        self.assertLessEqual(len(title_field), 60)
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-
-class TestReadTodayReviews(unittest.TestCase):
-    def test_reads_today(self):
-        import tempfile
-
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
-            f.write("|------|------|-----|--------|-------|---------|--------|\n")
-            f.write(f"| {today} | org/repo | #10 | alice | Fix X | safe change | approved |\n")
-            f.write("| 2020-01-01 | org/old | #1 | bob | Old | old | approved |\n")
-            f.flush()
-            entries = read_today_reviews(Path(f.name))
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["repo"], "org/repo")
-        self.assertEqual(entries[0]["action"], "approved")
-        Path(f.name).unlink()
-
-    def test_empty_file(self):
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
-            f.write("|------|------|-----|--------|-------|---------|--------|\n")
-            f.flush()
-            entries = read_today_reviews(Path(f.name))
-        self.assertEqual(len(entries), 0)
-        Path(f.name).unlink()
-
-
-class TestDaySummary(unittest.TestCase):
-    def test_no_reviews(self):
-        result = format_day_summary([])
-        self.assertIn("no reviews today", result)
-
-    def test_groups_by_repo(self):
-        e = {"summary": "ok"}
-        entries = [
-            {**e, "repo": "org/repo1", "pr_number": "#1", "author": "alice", "title": "Fix", "action": "approved"},
-            {**e, "repo": "org/repo1", "pr_number": "#2", "author": "bob", "title": "Update", "action": "skipped-ai"},
-            {**e, "repo": "org/repo2", "pr_number": "#5", "author": "carol", "title": "Add", "action": "approved"},
-        ]
-        result = format_day_summary(entries)
-        self.assertIn("3 reviews", result)
-        self.assertIn("org/repo1:", result)
-        self.assertIn("org/repo2:", result)
-        self.assertIn("#1 (alice)", result)
-        self.assertIn("#5 (carol)", result)
-
-
-class TestBuildReviewPrompt(unittest.TestCase):
-    def test_includes_title_and_diff(self):
-        prompt = build_review_prompt("+ new line\n- old line", "Update IAM policy")
-        self.assertIn("Update IAM policy", prompt)
-        self.assertIn("+ new line", prompt)
-        self.assertIn("security groups", prompt.lower())
-        self.assertIn("approve", prompt)
-
-    def test_truncates_long_diff(self):
-        long_diff = "x" * 10000
-        prompt = build_review_prompt(long_diff, "Big PR")
-        # Diff should be truncated to 8000 chars
-        self.assertLess(len(prompt), 9000)
-
-
-class TestFormatWarnings(unittest.TestCase):
-    def test_no_warnings(self):
-        self.assertEqual(format_warnings([]), "")
-
-    def test_single_warning(self):
-        result = format_warnings(["API error for org/repo"])
-        self.assertIn("Warnings:", result)
-        self.assertIn("API error", result)
-
-    def test_multiple_warnings(self):
-        result = format_warnings(["warn1", "warn2"])
-        self.assertIn("; ", result)
-
-
-class TestRunReview(unittest.TestCase):
-    """Integration tests for the main review flow."""
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "call_ai_json", return_value={"decision": "approve", "reason": "safe infra change"})
-    @patch.object(_mod, "approve_pr", return_value=True)
-    @patch.object(_mod, "get_diff", return_value="+ new_resource\n- old_resource\n")
-    @patch.object(_mod, "is_already_approved", return_value=False)
-    @patch.object(_mod, "list_prs")
-    @patch.object(_mod, "discover_repos", return_value=["org/infra"])
-    @patch.object(_mod, "verify_api_access", return_value="myuser")
-    @patch.object(_mod, "setup_logging")
-    def test_full_approve_flow(
-        self, mock_log, mock_verify, mock_discover, mock_list, mock_approved, mock_diff, mock_approve, mock_ai, mock_tg
-    ):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
-
-        tmpdir = tempfile.mkdtemp()
-        config_path = Path(tmpdir) / "config.yaml"
-        reviews_path = Path(tmpdir) / "reviews.md"
-        config = {
-            "hostname": "testhost",
-            "targets": [{"provider": "github", "org": "myorg"}],
-            "skip_bots": True,
-            "approval_cap": 2,
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        mock_list.return_value = [
-            {
-                "number": 42,
-                "title": "Update terraform",
-                "author": "dev",
-                "additions": 10,
-                "deletions": 5,
-                "changed_files": 2,
-            }
-        ]
-
-        lock_path = Path(tmpdir) / ".lock"
-        with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
-            run_review(config_path)
-
-        mock_ai.assert_called_once()
-        mock_approve.assert_called_once_with(
-            "org/infra",
-            42,
-            "github",
-            {},
-            mock_logger,
-        )
-        self.assertTrue(reviews_path.exists())
-        content = reviews_path.read_text()
-        self.assertIn("approved", content)
-        self.assertIn("#42", content)
-
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "setup_logging")
-    def test_config_error(self, mock_log, mock_tg):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
-
-        tmpdir = tempfile.mkdtemp()
-        lock_path = Path(tmpdir) / ".lock"
-        with patch.object(_mod, "LOCK_FILE", lock_path):
-            run_review(Path("/nonexistent/config.yaml"))
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-        mock_logger.error.assert_called()
-        fatal_calls = [c for c in mock_tg.call_args_list if "FATAL" in str(c)]
-        self.assertGreater(len(fatal_calls), 0)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "call_ai_json", return_value={"decision": "approve", "reason": "safe"})
-    @patch.object(_mod, "approve_pr", return_value=True)
-    @patch.object(_mod, "get_diff", return_value="+ line\n")
-    @patch.object(_mod, "is_already_approved", return_value=False)
-    @patch.object(_mod, "list_prs")
-    @patch.object(_mod, "discover_repos", return_value=["org/infra"])
-    @patch.object(_mod, "verify_api_access", return_value="myuser")
-    @patch.object(_mod, "setup_logging")
-    def test_approval_cap_enforced(
-        self, mock_log, mock_verify, mock_discover, mock_list, mock_approved, mock_diff, mock_approve, mock_ai, mock_tg
-    ):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
-
-        tmpdir = tempfile.mkdtemp()
-        config_path = Path(tmpdir) / "config.yaml"
-        reviews_path = Path(tmpdir) / "reviews.md"
-        config = {
-            "hostname": "testhost",
-            "targets": [{"provider": "github", "org": "myorg"}],
-            "skip_bots": True,
-            "approval_cap": 1,
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        pr_base = {"author": "dev", "additions": 5, "deletions": 3, "changed_files": 1}
-        mock_list.return_value = [
-            {**pr_base, "number": 1, "title": "PR1"},
-            {**pr_base, "number": 2, "title": "PR2"},
-        ]
-
-        lock_path = Path(tmpdir) / ".lock"
-        with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
-            run_review(config_path)
-
-        # Only 1 approval due to cap
-        self.assertEqual(mock_approve.call_count, 1)
-
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "setup_logging")
-    def test_day_summary(self, mock_log, mock_tg):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
-
-        tmpdir = tempfile.mkdtemp()
-        config_path = Path(tmpdir) / "config.yaml"
-        reviews_path = Path(tmpdir) / "reviews.md"
-
-        config = {"hostname": "testhost", "targets": [{"provider": "github", "org": "myorg"}]}
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
-        reviews_path.parent.mkdir(parents=True, exist_ok=True)
-        reviews_path.write_text(
-            "| Date | Repo | PR# | Author | Title | Summary | Action |\n"
-            "|------|------|-----|--------|-------|---------|--------|\n"
-            f"| {today} | org/repo | #10 | dev | Fix X | safe | approved |\n"
-        )
-
-        with patch.object(_mod, "REVIEWS_FILE", reviews_path):
-            run_day_summary(config_path)
-
-        mock_tg.assert_called()
-        sent = mock_tg.call_args[0][0]
-        self.assertIn("1 reviews", sent)
-        self.assertIn("org/repo", sent)
-
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-
-class TestWarningCollection(unittest.TestCase):
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "get_diff", return_value="")
-    @patch.object(_mod, "is_already_approved", return_value=False)
-    @patch.object(_mod, "list_prs")
-    @patch.object(_mod, "discover_repos", return_value=["org/infra"])
-    @patch.object(_mod, "verify_api_access", return_value="myuser")
-    @patch.object(_mod, "setup_logging")
-    def test_empty_diff_warning(
-        self,
-        mock_log,
-        mock_verify,
-        mock_discover,
-        mock_list,
-        mock_approved,
-        mock_diff,
-        mock_tg,
-    ):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
-
-        tmpdir = tempfile.mkdtemp()
-        config_path = Path(tmpdir) / "config.yaml"
-        reviews_path = Path(tmpdir) / "reviews.md"
-        config = {
-            "hostname": "testhost",
-            "targets": [{"provider": "github", "org": "myorg"}],
-            "approval_cap": 5,
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        mock_list.return_value = [
-            {
-                "number": 1,
-                "title": "PR1",
-                "author": "dev",
-                "additions": 5,
-                "deletions": 3,
-                "changed_files": 1,
-            }
-        ]
-
-        with patch.object(_mod, "REVIEWS_FILE", reviews_path):
-            run_review(config_path)
-
-        # Should log a warning about empty diff
-        warning_calls = [c for c in mock_logger.warning.call_args_list if "diff" in str(c).lower()]
-        self.assertGreater(len(warning_calls), 0)
-
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-    @patch.object(_mod, "send_telegram")
-    @patch.object(_mod, "discover_repos", return_value=[])
-    @patch.object(_mod, "verify_api_access", return_value="myuser")
-    @patch.object(_mod, "setup_logging")
-    def test_no_repos_warning(self, mock_log, mock_verify, mock_discover, mock_tg):
-        import tempfile
-
-        mock_logger = MagicMock(spec=logging.Logger)
-        mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
-
-        tmpdir = tempfile.mkdtemp()
-        config_path = Path(tmpdir) / "config.yaml"
-        reviews_path = Path(tmpdir) / "reviews.md"
-        config = {
-            "hostname": "testhost",
-            "targets": [{"provider": "github", "org": "myorg"}],
-            "approval_cap": 5,
-        }
-        with open(config_path, "w") as f:
-            yaml.dump(config, f)
-
-        with patch.object(_mod, "REVIEWS_FILE", reviews_path):
-            run_review(config_path)
-
-        # Should log a warning about no repos
-        warning_calls = [c for c in mock_logger.warning.call_args_list if "No repos" in str(c) or "Warnings" in str(c)]
-        self.assertGreater(len(warning_calls), 0)
-
-        import shutil
-
-        shutil.rmtree(tmpdir)
-
-
-class TestGlabProxy(unittest.TestCase):
-    @patch.object(_mod, "_run_cmd")
-    def test_start_proxy_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        logger = MagicMock()
-        result = start_glab_proxy({"glab": "/path/to/wrapper"}, "host", logger)
-        self.assertTrue(result)
-        mock_run.assert_called_once_with(["/path/to/wrapper", "--start-proxy", "host"], timeout=60)
-
-    @patch.object(_mod, "_run_cmd")
-    def test_start_proxy_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stderr="auth failed")
-        logger = MagicMock()
-        result = start_glab_proxy({"glab": "/path/to/wrapper"}, "host", logger)
-        self.assertFalse(result)
-
-    def test_no_wrapper_skips(self):
-        logger = MagicMock()
-        result = start_glab_proxy({}, "host", logger)
-        self.assertTrue(result)
-
-    @patch.object(_mod, "_run_cmd")
-    def test_stop_proxy(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        logger = MagicMock()
-        stop_glab_proxy({"glab": "/path/to/wrapper"}, logger)
-        mock_run.assert_called_once_with(["/path/to/wrapper", "--stop-proxy"], timeout=60)
-
-
-class TestVerifyAccess(unittest.TestCase):
-    @patch.object(_mod, "_run_cmd")
-    def test_github_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="myuser\n")
-        result = verify_api_access("github", {})
-        self.assertEqual(result, "myuser")
-
-    @patch.object(_mod, "_run_cmd")
-    def test_github_failure(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="auth error")
-        result = verify_api_access("github", {})
-        self.assertIsNone(result)
-
-    @patch.object(_mod, "_run_cmd")
-    def test_gitlab_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({"username": "gluser"}))
-        result = verify_api_access("gitlab", {})
-        self.assertEqual(result, "gluser")
-
-    def test_unknown_provider(self):
-        result = verify_api_access("bitbucket", {})
-        self.assertIsNone(result)
-
-
-class TestEncodeGitlabPath(unittest.TestCase):
-    def test_encodes_slash(self):
-        self.assertEqual(_encode_gitlab_path("group/project"), "group%2Fproject")
-
-    def test_no_slash(self):
-        self.assertEqual(_encode_gitlab_path("project"), "project")
-
-
 if __name__ == "__main__":
     if "--tests" in sys.argv:
+        import unittest
+        from unittest.mock import MagicMock, patch
+
+        _mod = sys.modules[__name__]
+
+        class TestLoadConfig(unittest.TestCase):
+            def test_valid_config(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test", "targets": [{"provider": "github", "org": "myorg"}]}, f)
+                    f.flush()
+                    config = load_config(Path(f.name))
+                self.assertEqual(config["hostname"], "test")
+                self.assertEqual(len(config["targets"]), 1)
+                Path(f.name).unlink()
+
+            def test_missing_config(self):
+                with self.assertRaises(FileNotFoundError):
+                    load_config(Path("/nonexistent/config.yaml"))
+
+            def test_missing_targets_key(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test"}, f)
+                    f.flush()
+                    with self.assertRaises(ValueError):
+                        load_config(Path(f.name))
+                Path(f.name).unlink()
+
+            def test_empty_targets(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+                    yaml.dump({"hostname": "test", "targets": []}, f)
+                    f.flush()
+                    with self.assertRaises(ValueError):
+                        load_config(Path(f.name))
+                Path(f.name).unlink()
+
+        class TestDiscoverRepos(unittest.TestCase):
+            @patch.object(_mod, "_run_cmd")
+            def test_github_rest_api(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0, stdout="org/repo1\norg/repo2\norg/repo3\n")
+                logger = MagicMock()
+                repos = _discover_github_repos("org", {}, logger)
+                self.assertEqual(repos, ["org/repo1", "org/repo2", "org/repo3"])
+
+            @patch.object(_mod, "_run_cmd")
+            def test_github_fallback_to_search(self, mock_run):
+                # First call (REST) fails, second call (search) succeeds
+                mock_run.side_effect = [
+                    MagicMock(returncode=1, stdout="", stderr="not found"),
+                    MagicMock(returncode=0, stdout="org/repo-a\n"),
+                ]
+                logger = MagicMock()
+                repos = _discover_github_repos("org", {}, logger)
+                self.assertEqual(repos, ["org/repo-a"])
+                self.assertEqual(mock_run.call_count, 2)
+
+            @patch.object(_mod, "_run_cmd")
+            def test_gitlab_repos(self, mock_run):
+                mock_run.return_value = MagicMock(
+                    returncode=0,
+                    stdout=json.dumps(
+                        [
+                            {"path_with_namespace": "group/proj1"},
+                            {"path_with_namespace": "group/proj2"},
+                        ]
+                    ),
+                )
+                logger = MagicMock()
+                repos = _discover_gitlab_repos("group", {}, logger)
+                self.assertEqual(repos, ["group/proj1", "group/proj2"])
+
+            def test_filter_include_only(self):
+                repos = ["org/infra-core", "org/infra-tools", "org/webapp"]
+                result = _filter_repos(repos, include_only=["infra-"], exclude=[])
+                self.assertEqual(result, ["org/infra-core", "org/infra-tools"])
+
+            def test_filter_exclude(self):
+                repos = ["org/infra-core", "org/archived-stuff", "org/webapp"]
+                result = _filter_repos(repos, include_only=[], exclude=["archived-"])
+                self.assertEqual(result, ["org/infra-core", "org/webapp"])
+
+            def test_filter_combined(self):
+                repos = ["org/infra-core", "org/infra-old", "org/webapp"]
+                result = _filter_repos(repos, include_only=["infra-"], exclude=["old"])
+                self.assertEqual(result, ["org/infra-core"])
+
+            @patch.object(_mod, "_discover_github_repos")
+            def test_discover_repos_limits_to_5(self, mock_discover):
+                mock_discover.return_value = [f"org/repo{i}" for i in range(10)]
+                logger = MagicMock()
+                target = {"provider": "github", "org": "org"}
+                repos = discover_repos(target, {}, logger)
+                self.assertEqual(len(repos), 5)
+
+        def _gh_pr(num, title, login, draft=False, adds=5, dels=3, files=2):
+            """Helper to build a GitHub PR JSON object for tests."""
+            return {
+                "number": num,
+                "title": title,
+                "author": {"login": login},
+                "isDraft": draft,
+                "additions": adds,
+                "deletions": dels,
+                "changedFiles": files,
+            }
+
+        class TestListPrs(unittest.TestCase):
+            @patch.object(_mod, "_run_cmd")
+            def test_github_filters_drafts(self, mock_run):
+                prs_json = json.dumps(
+                    [
+                        _gh_pr(1, "PR1", "user1"),
+                        _gh_pr(2, "Draft", "user2", draft=True, adds=0, dels=0, files=0),
+                    ]
+                )
+                mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
+                logger = MagicMock()
+                result = _list_github_prs("org/repo", "me", True, {}, logger)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["number"], 1)
+
+            @patch.object(_mod, "_run_cmd")
+            def test_github_filters_own(self, mock_run):
+                prs_json = json.dumps(
+                    [
+                        _gh_pr(1, "Own PR", "me"),
+                        _gh_pr(2, "Other PR", "other"),
+                    ]
+                )
+                mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
+                logger = MagicMock()
+                result = _list_github_prs("org/repo", "me", True, {}, logger)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["author"], "other")
+
+            @patch.object(_mod, "_run_cmd")
+            def test_github_filters_bots(self, mock_run):
+                prs_json = json.dumps(
+                    [
+                        _gh_pr(1, "Bot PR", "dependabot[bot]"),
+                        _gh_pr(2, "Human PR", "dev"),
+                    ]
+                )
+                mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
+                logger = MagicMock()
+                result = _list_github_prs("org/repo", "me", True, {}, logger)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["author"], "dev")
+
+            @patch.object(_mod, "_run_cmd")
+            def test_github_keeps_bots_when_skip_false(self, mock_run):
+                prs_json = json.dumps([_gh_pr(1, "Bot PR", "dependabot[bot]")])
+                mock_run.return_value = MagicMock(returncode=0, stdout=prs_json)
+                logger = MagicMock()
+                result = _list_github_prs("org/repo", "me", False, {}, logger)
+                self.assertEqual(len(result), 1)
+
+            @patch.object(_mod, "_run_cmd")
+            def test_gitlab_filters_drafts_and_own(self, mock_run):
+                mrs_json = json.dumps(
+                    [
+                        {
+                            "iid": 1,
+                            "title": "MR1",
+                            "author": {"username": "user1"},
+                            "draft": False,
+                            "work_in_progress": False,
+                        },
+                        {
+                            "iid": 2,
+                            "title": "Draft",
+                            "author": {"username": "user2"},
+                            "draft": True,
+                            "work_in_progress": False,
+                        },
+                        {
+                            "iid": 3,
+                            "title": "Own",
+                            "author": {"username": "me"},
+                            "draft": False,
+                            "work_in_progress": False,
+                        },
+                    ]
+                )
+                mock_run.return_value = MagicMock(returncode=0, stdout=mrs_json)
+                logger = MagicMock()
+                result = _list_gitlab_mrs("group/proj", "me", True, {}, logger)
+                self.assertEqual(len(result), 1)
+                self.assertEqual(result[0]["number"], 1)
+
+        class TestComplexityGate(unittest.TestCase):
+            def test_github_within_limits(self):
+                pr_data = {"changed_files": 3, "additions": 50, "deletions": 30}
+                logger = MagicMock()
+                within, files, lines = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
+                self.assertTrue(within)
+                self.assertEqual(files, 3)
+                self.assertEqual(lines, 80)
+
+            def test_github_too_many_files(self):
+                pr_data = {"changed_files": 10, "additions": 50, "deletions": 30}
+                logger = MagicMock()
+                within, files, lines = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
+                self.assertFalse(within)
+
+            def test_github_too_many_lines(self):
+                pr_data = {"changed_files": 2, "additions": 200, "deletions": 200}
+                logger = MagicMock()
+                within, files, lines = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
+                self.assertFalse(within)
+
+            @patch.object(_mod, "_fetch_gitlab_mr_stats", return_value=(3, 50))
+            def test_gitlab_fetches_stats(self, mock_fetch):
+                pr_data = {"changed_files": 0, "additions": 0, "deletions": 0}
+                logger = MagicMock()
+                within, files, lines = check_complexity(pr_data, "group/proj", 1, "gitlab", {}, logger)
+                self.assertTrue(within)
+                self.assertEqual(files, 3)
+                self.assertEqual(lines, 50)
+                mock_fetch.assert_called_once()
+
+            @patch.object(_mod, "_fetch_gitlab_mr_stats", return_value=(10, 500))
+            def test_gitlab_over_limits(self, mock_fetch):
+                pr_data = {"changed_files": 0, "additions": 0, "deletions": 0}
+                logger = MagicMock()
+                within, files, lines = check_complexity(pr_data, "group/proj", 1, "gitlab", {}, logger)
+                self.assertFalse(within)
+
+            def test_boundary_at_limits(self):
+                pr_data = {"changed_files": MAX_FILES, "additions": MAX_LINES, "deletions": 0}
+                logger = MagicMock()
+                within, _, _ = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
+                self.assertTrue(within)
+
+            def test_boundary_just_over(self):
+                pr_data = {"changed_files": MAX_FILES + 1, "additions": 0, "deletions": 0}
+                logger = MagicMock()
+                within, _, _ = check_complexity(pr_data, "org/repo", 1, "github", {}, logger)
+                self.assertFalse(within)
+
+        class TestApprovalCap(unittest.TestCase):
+            def test_count_approvals(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                    today = datetime.now(UTC).strftime("%Y-%m-%d")
+                    f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
+                    f.write("|------|------|-----|--------|-------|---------|--------|\n")
+                    f.write(f"| {today} | org/repo | #1 | dev | Fix | safe | approved |\n")
+                    f.write(f"| {today} | org/repo | #2 | dev | Update | too complex | skipped-complexity |\n")
+                    f.write(f"| {today} | org/repo | #3 | dev | Add | safe | approved |\n")
+                    f.flush()
+                    count = count_today_approvals(Path(f.name))
+                self.assertEqual(count, 2)
+                Path(f.name).unlink()
+
+            def test_count_no_file(self):
+                self.assertEqual(count_today_approvals(Path("/nonexistent/reviews.md")), 0)
+
+            def test_count_ignores_other_dates(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                    f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
+                    f.write("|------|------|-----|--------|-------|---------|--------|\n")
+                    f.write("| 2020-01-01 | org/repo | #1 | dev | Old | safe | approved |\n")
+                    f.flush()
+                    count = count_today_approvals(Path(f.name))
+                self.assertEqual(count, 0)
+                Path(f.name).unlink()
+
+        class TestReviewLog(unittest.TestCase):
+            def test_creates_file_with_header(self):
+                import tempfile
+
+                tmpdir = tempfile.mkdtemp()
+                reviews_file = Path(tmpdir) / "reviews.md"
+                append_review(reviews_file, "org/repo", 42, "dev", "Fix thing", "looks safe", "approved")
+                content = reviews_file.read_text()
+                self.assertIn("| Date | Repo |", content)
+                self.assertIn("org/repo", content)
+                self.assertIn("#42", content)
+                self.assertIn("approved", content)
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+            def test_appends_to_existing(self):
+                import tempfile
+
+                tmpdir = tempfile.mkdtemp()
+                reviews_file = Path(tmpdir) / "reviews.md"
+                append_review(reviews_file, "org/repo", 1, "dev", "First", "ok", "approved")
+                append_review(reviews_file, "org/repo", 2, "dev", "Second", "ok", "skipped-ai")
+                content = reviews_file.read_text()
+                rows = [x for x in content.splitlines() if x.startswith("|") and "org/repo" in x]
+                self.assertEqual(len(rows), 2)
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+            def test_replaces_pipes_in_title(self):
+                import tempfile
+
+                tmpdir = tempfile.mkdtemp()
+                reviews_file = Path(tmpdir) / "reviews.md"
+                append_review(reviews_file, "org/repo", 1, "dev", "Fix | bar", "ok", "approved")
+                content = reviews_file.read_text()
+                self.assertIn("Fix / bar", content)
+                self.assertNotIn("Fix | bar", content.split("\n")[-2])
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+            def test_truncates_long_title(self):
+                import tempfile
+
+                tmpdir = tempfile.mkdtemp()
+                reviews_file = Path(tmpdir) / "reviews.md"
+                long_title = "A" * 100
+                append_review(reviews_file, "org/repo", 1, "dev", long_title, "ok", "approved")
+                content = reviews_file.read_text()
+                # Title should be truncated to 60 chars
+                lines = content.splitlines()
+                data_line = [x for x in lines if "AAAA" in x][0]
+                title_field = data_line.split("|")[5].strip()
+                self.assertLessEqual(len(title_field), 60)
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+        class TestReadTodayReviews(unittest.TestCase):
+            def test_reads_today(self):
+                import tempfile
+
+                today = datetime.now(UTC).strftime("%Y-%m-%d")
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                    f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
+                    f.write("|------|------|-----|--------|-------|---------|--------|\n")
+                    f.write(f"| {today} | org/repo | #10 | alice | Fix X | safe change | approved |\n")
+                    f.write("| 2020-01-01 | org/old | #1 | bob | Old | old | approved |\n")
+                    f.flush()
+                    entries = read_today_reviews(Path(f.name))
+                self.assertEqual(len(entries), 1)
+                self.assertEqual(entries[0]["repo"], "org/repo")
+                self.assertEqual(entries[0]["action"], "approved")
+                Path(f.name).unlink()
+
+            def test_empty_file(self):
+                import tempfile
+
+                with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+                    f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
+                    f.write("|------|------|-----|--------|-------|---------|--------|\n")
+                    f.flush()
+                    entries = read_today_reviews(Path(f.name))
+                self.assertEqual(len(entries), 0)
+                Path(f.name).unlink()
+
+        class TestDaySummary(unittest.TestCase):
+            def test_no_reviews(self):
+                result = format_day_summary([])
+                self.assertIn("no reviews today", result)
+
+            def test_groups_by_repo(self):
+                e = {"summary": "ok"}
+                entries = [
+                    {
+                        **e,
+                        "repo": "org/repo1",
+                        "pr_number": "#1",
+                        "author": "alice",
+                        "title": "Fix",
+                        "action": "approved",
+                    },
+                    {
+                        **e,
+                        "repo": "org/repo1",
+                        "pr_number": "#2",
+                        "author": "bob",
+                        "title": "Update",
+                        "action": "skipped-ai",
+                    },
+                    {
+                        **e,
+                        "repo": "org/repo2",
+                        "pr_number": "#5",
+                        "author": "carol",
+                        "title": "Add",
+                        "action": "approved",
+                    },
+                ]
+                result = format_day_summary(entries)
+                self.assertIn("3 reviews", result)
+                self.assertIn("org/repo1:", result)
+                self.assertIn("org/repo2:", result)
+                self.assertIn("#1 (alice)", result)
+                self.assertIn("#5 (carol)", result)
+
+        class TestBuildReviewPrompt(unittest.TestCase):
+            def test_includes_title_and_diff(self):
+                prompt = build_review_prompt("+ new line\n- old line", "Update IAM policy")
+                self.assertIn("Update IAM policy", prompt)
+                self.assertIn("+ new line", prompt)
+                self.assertIn("security groups", prompt.lower())
+                self.assertIn("approve", prompt)
+
+            def test_truncates_long_diff(self):
+                long_diff = "x" * 10000
+                prompt = build_review_prompt(long_diff, "Big PR")
+                # Diff should be truncated to 8000 chars
+                self.assertLess(len(prompt), 9000)
+
+        class TestFormatWarnings(unittest.TestCase):
+            def test_no_warnings(self):
+                self.assertEqual(format_warnings([]), "")
+
+            def test_single_warning(self):
+                result = format_warnings(["API error for org/repo"])
+                self.assertIn("Warnings:", result)
+                self.assertIn("API error", result)
+
+            def test_multiple_warnings(self):
+                result = format_warnings(["warn1", "warn2"])
+                self.assertIn("; ", result)
+
+        class TestRunReview(unittest.TestCase):
+            """Integration tests for the main review flow."""
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "call_ai_json", return_value={"decision": "approve", "reason": "safe infra change"})
+            @patch.object(_mod, "approve_pr", return_value=True)
+            @patch.object(_mod, "get_diff", return_value="+ new_resource\n- old_resource\n")
+            @patch.object(_mod, "is_already_approved", return_value=False)
+            @patch.object(_mod, "list_prs")
+            @patch.object(_mod, "discover_repos", return_value=["org/infra"])
+            @patch.object(_mod, "verify_api_access", return_value="myuser")
+            @patch.object(_mod, "setup_logging")
+            def test_full_approve_flow(
+                self,
+                mock_log,
+                mock_verify,
+                mock_discover,
+                mock_list,
+                mock_approved,
+                mock_diff,
+                mock_approve,
+                mock_ai,
+                mock_tg,
+            ):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
+
+                tmpdir = tempfile.mkdtemp()
+                config_path = Path(tmpdir) / "config.yaml"
+                reviews_path = Path(tmpdir) / "reviews.md"
+                config = {
+                    "hostname": "testhost",
+                    "targets": [{"provider": "github", "org": "myorg"}],
+                    "skip_bots": True,
+                    "approval_cap": 2,
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                mock_list.return_value = [
+                    {
+                        "number": 42,
+                        "title": "Update terraform",
+                        "author": "dev",
+                        "additions": 10,
+                        "deletions": 5,
+                        "changed_files": 2,
+                    }
+                ]
+
+                lock_path = Path(tmpdir) / ".lock"
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
+                    run_review(config_path)
+
+                mock_ai.assert_called_once()
+                mock_approve.assert_called_once_with(
+                    "org/infra",
+                    42,
+                    "github",
+                    {},
+                    mock_logger,
+                )
+                self.assertTrue(reviews_path.exists())
+                content = reviews_path.read_text()
+                self.assertIn("approved", content)
+                self.assertIn("#42", content)
+
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "setup_logging")
+            def test_config_error(self, mock_log, mock_tg):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
+
+                tmpdir = tempfile.mkdtemp()
+                lock_path = Path(tmpdir) / ".lock"
+                with patch.object(_mod, "LOCK_FILE", lock_path):
+                    run_review(Path("/nonexistent/config.yaml"))
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+                mock_logger.error.assert_called()
+                fatal_calls = [c for c in mock_tg.call_args_list if "FATAL" in str(c)]
+                self.assertGreater(len(fatal_calls), 0)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "call_ai_json", return_value={"decision": "approve", "reason": "safe"})
+            @patch.object(_mod, "approve_pr", return_value=True)
+            @patch.object(_mod, "get_diff", return_value="+ line\n")
+            @patch.object(_mod, "is_already_approved", return_value=False)
+            @patch.object(_mod, "list_prs")
+            @patch.object(_mod, "discover_repos", return_value=["org/infra"])
+            @patch.object(_mod, "verify_api_access", return_value="myuser")
+            @patch.object(_mod, "setup_logging")
+            def test_approval_cap_enforced(
+                self,
+                mock_log,
+                mock_verify,
+                mock_discover,
+                mock_list,
+                mock_approved,
+                mock_diff,
+                mock_approve,
+                mock_ai,
+                mock_tg,
+            ):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
+
+                tmpdir = tempfile.mkdtemp()
+                config_path = Path(tmpdir) / "config.yaml"
+                reviews_path = Path(tmpdir) / "reviews.md"
+                config = {
+                    "hostname": "testhost",
+                    "targets": [{"provider": "github", "org": "myorg"}],
+                    "skip_bots": True,
+                    "approval_cap": 1,
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                pr_base = {"author": "dev", "additions": 5, "deletions": 3, "changed_files": 1}
+                mock_list.return_value = [
+                    {**pr_base, "number": 1, "title": "PR1"},
+                    {**pr_base, "number": 2, "title": "PR2"},
+                ]
+
+                lock_path = Path(tmpdir) / ".lock"
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
+                    run_review(config_path)
+
+                # Only 1 approval due to cap
+                self.assertEqual(mock_approve.call_count, 1)
+
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "setup_logging")
+            def test_day_summary(self, mock_log, mock_tg):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
+
+                tmpdir = tempfile.mkdtemp()
+                config_path = Path(tmpdir) / "config.yaml"
+                reviews_path = Path(tmpdir) / "reviews.md"
+
+                config = {"hostname": "testhost", "targets": [{"provider": "github", "org": "myorg"}]}
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                today = datetime.now(UTC).strftime("%Y-%m-%d")
+                reviews_path.parent.mkdir(parents=True, exist_ok=True)
+                reviews_path.write_text(
+                    "| Date | Repo | PR# | Author | Title | Summary | Action |\n"
+                    "|------|------|-----|--------|-------|---------|--------|\n"
+                    f"| {today} | org/repo | #10 | dev | Fix X | safe | approved |\n"
+                )
+
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+                    run_day_summary(config_path)
+
+                mock_tg.assert_called()
+                sent = mock_tg.call_args[0][0]
+                self.assertIn("1 reviews", sent)
+                self.assertIn("org/repo", sent)
+
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+        class TestWarningCollection(unittest.TestCase):
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "get_diff", return_value="")
+            @patch.object(_mod, "is_already_approved", return_value=False)
+            @patch.object(_mod, "list_prs")
+            @patch.object(_mod, "discover_repos", return_value=["org/infra"])
+            @patch.object(_mod, "verify_api_access", return_value="myuser")
+            @patch.object(_mod, "setup_logging")
+            def test_empty_diff_warning(
+                self,
+                mock_log,
+                mock_verify,
+                mock_discover,
+                mock_list,
+                mock_approved,
+                mock_diff,
+                mock_tg,
+            ):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
+
+                tmpdir = tempfile.mkdtemp()
+                config_path = Path(tmpdir) / "config.yaml"
+                reviews_path = Path(tmpdir) / "reviews.md"
+                config = {
+                    "hostname": "testhost",
+                    "targets": [{"provider": "github", "org": "myorg"}],
+                    "approval_cap": 5,
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                mock_list.return_value = [
+                    {
+                        "number": 1,
+                        "title": "PR1",
+                        "author": "dev",
+                        "additions": 5,
+                        "deletions": 3,
+                        "changed_files": 1,
+                    }
+                ]
+
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+                    run_review(config_path)
+
+                # Should log a warning about empty diff
+                warning_calls = [c for c in mock_logger.warning.call_args_list if "diff" in str(c).lower()]
+                self.assertGreater(len(warning_calls), 0)
+
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+            @patch.object(_mod, "send_telegram")
+            @patch.object(_mod, "discover_repos", return_value=[])
+            @patch.object(_mod, "verify_api_access", return_value="myuser")
+            @patch.object(_mod, "setup_logging")
+            def test_no_repos_warning(self, mock_log, mock_verify, mock_discover, mock_tg):
+                import tempfile
+
+                mock_logger = MagicMock(spec=logging.Logger)
+                mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
+
+                tmpdir = tempfile.mkdtemp()
+                config_path = Path(tmpdir) / "config.yaml"
+                reviews_path = Path(tmpdir) / "reviews.md"
+                config = {
+                    "hostname": "testhost",
+                    "targets": [{"provider": "github", "org": "myorg"}],
+                    "approval_cap": 5,
+                }
+                with open(config_path, "w") as f:
+                    yaml.dump(config, f)
+
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+                    run_review(config_path)
+
+                # Should log a warning about no repos
+                warning_calls = [
+                    c for c in mock_logger.warning.call_args_list if "No repos" in str(c) or "Warnings" in str(c)
+                ]
+                self.assertGreater(len(warning_calls), 0)
+
+                import shutil
+
+                shutil.rmtree(tmpdir)
+
+        class TestGlabProxy(unittest.TestCase):
+            @patch.object(_mod, "_run_cmd")
+            def test_start_proxy_success(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0)
+                logger = MagicMock()
+                result = start_glab_proxy({"glab": "/path/to/wrapper"}, "host", logger)
+                self.assertTrue(result)
+                mock_run.assert_called_once_with(["/path/to/wrapper", "--start-proxy", "host"], timeout=60)
+
+            @patch.object(_mod, "_run_cmd")
+            def test_start_proxy_failure(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=1, stderr="auth failed")
+                logger = MagicMock()
+                result = start_glab_proxy({"glab": "/path/to/wrapper"}, "host", logger)
+                self.assertFalse(result)
+
+            def test_no_wrapper_skips(self):
+                logger = MagicMock()
+                result = start_glab_proxy({}, "host", logger)
+                self.assertTrue(result)
+
+            @patch.object(_mod, "_run_cmd")
+            def test_stop_proxy(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0)
+                logger = MagicMock()
+                stop_glab_proxy({"glab": "/path/to/wrapper"}, logger)
+                mock_run.assert_called_once_with(["/path/to/wrapper", "--stop-proxy"], timeout=60)
+
+        class TestVerifyAccess(unittest.TestCase):
+            @patch.object(_mod, "_run_cmd")
+            def test_github_success(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0, stdout="myuser\n")
+                result = verify_api_access("github", {})
+                self.assertEqual(result, "myuser")
+
+            @patch.object(_mod, "_run_cmd")
+            def test_github_failure(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="auth error")
+                result = verify_api_access("github", {})
+                self.assertIsNone(result)
+
+            @patch.object(_mod, "_run_cmd")
+            def test_gitlab_success(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({"username": "gluser"}))
+                result = verify_api_access("gitlab", {})
+                self.assertEqual(result, "gluser")
+
+            def test_unknown_provider(self):
+                result = verify_api_access("bitbucket", {})
+                self.assertIsNone(result)
+
+        class TestEncodeGitlabPath(unittest.TestCase):
+            def test_encodes_slash(self):
+                self.assertEqual(_encode_gitlab_path("group/project"), "group%2Fproject")
+
+            def test_no_slash(self):
+                self.assertEqual(_encode_gitlab_path("project"), "project")
+
         unittest.main(argv=[sys.argv[0]], exit=True)
     else:
         main()

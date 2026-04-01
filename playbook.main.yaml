@@ -101,6 +101,7 @@ tasks:
             --exclude '*.pyc' \
             --exclude 'config.yaml' \
             --exclude '.version' \
+            --exclude '.lock' \
             --exclude 'reviews.md' \
             --exclude 'user-cache.txt' \
             --exclude '.venv' \
