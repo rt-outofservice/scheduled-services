@@ -79,7 +79,7 @@ def normalize_headline(text: str) -> str:
     text = text.lower().strip()
     text = unicodedata.normalize("NFKD", text)
     text = "".join(c for c in text if not unicodedata.combining(c))
-    text = re.sub(r"[^a-z0-9 ]", "", text)
+    text = re.sub(r"[^\w ]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text
 
@@ -481,6 +481,13 @@ if __name__ == "__main__":
 
             def test_extra_spaces(self):
                 self.assertEqual(normalize_headline("  hello   world  "), "hello world")
+
+            def test_cyrillic(self):
+                self.assertEqual(normalize_headline("Новости дня"), "новости дня")
+
+            def test_cyrillic_dedup_not_empty(self):
+                # Non-Latin headlines must not normalize to empty string
+                self.assertTrue(len(normalize_headline("Путин подписал указ")) > 0)
 
             def test_empty(self):
                 self.assertEqual(normalize_headline(""), "")

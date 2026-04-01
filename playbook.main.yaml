@@ -54,7 +54,7 @@ tasks:
       - name: check-required-tools
         script: |
           missing=()
-          for tool in uv yq python3; do
+          for tool in uv yq python3 rsync claude; do
             command -v "$tool" &>/dev/null || missing+=("$tool")
           done
 

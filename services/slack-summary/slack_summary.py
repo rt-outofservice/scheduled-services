@@ -77,7 +77,7 @@ def parse_timeframe(timeframe: str) -> datetime:
 
 def format_timestamp_iso(dt: datetime) -> str:
     """Format datetime as ISO 8601 string for slackdump -time-from."""
-    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def validate_slackdump_auth(first_channel: str, logger: logging.Logger) -> bool:
@@ -648,7 +648,7 @@ if __name__ == "__main__":
         class TestFormatTimestampIso(unittest.TestCase):
             def test_format(self):
                 dt = datetime(2026, 4, 1, 10, 30, 0, tzinfo=UTC)
-                self.assertEqual(format_timestamp_iso(dt), "2026-04-01T10:30:00")
+                self.assertEqual(format_timestamp_iso(dt), "2026-04-01T10:30:00Z")
 
         class TestValidateSlackdumpAuth(unittest.TestCase):
             @patch("subprocess.run")

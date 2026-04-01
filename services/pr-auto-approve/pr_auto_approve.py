@@ -742,7 +742,16 @@ def run_day_summary(config_path: Path) -> None:
         return
 
     hostname = config.get("hostname", "")
-    entries = read_today_reviews(REVIEWS_FILE)
+
+    # Acquire exclusive lock to avoid reading reviews.md while a review run is writing
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOCK_FILE, "w") as lock_fp:
+        fcntl.flock(lock_fp, fcntl.LOCK_EX)
+        try:
+            entries = read_today_reviews(REVIEWS_FILE)
+        finally:
+            fcntl.flock(lock_fp, fcntl.LOCK_UN)
+
     summary = format_day_summary(entries)
     logger.info(f"Day summary: {len(entries)} reviews")
     send_telegram(summary, hostname=hostname)
@@ -1371,7 +1380,8 @@ if __name__ == "__main__":
                     f"| {today} | org/repo | #10 | dev | Fix X | safe | approved |\n"
                 )
 
-                with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+                lock_path = Path(tmpdir) / ".lock"
+                with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
                     run_day_summary(config_path)
 
                 mock_tg.assert_called()
