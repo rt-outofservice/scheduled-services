@@ -597,7 +597,9 @@ def _run_review_inner(config_path: Path, logger: logging.Logger) -> None:
             stop_glab_proxy(cli_wrappers, logger)
 
     if warnings:
-        logger.warning(format_warnings(warnings))
+        warn_text = format_warnings(warnings)
+        logger.warning(warn_text)
+        send_telegram(f"pr-auto-approve: {warn_text}", hostname=hostname)
 
 
 def _run_review_loop(
