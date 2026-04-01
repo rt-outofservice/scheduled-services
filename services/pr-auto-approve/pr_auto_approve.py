@@ -26,7 +26,7 @@ import logging
 import subprocess
 import sys
 import unittest
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import quote as urlquote
@@ -485,7 +485,7 @@ def append_review(
             "| Date | Repo | PR# | Author | Title | Summary | Action |\n"
             "|------|------|-----|--------|-------|---------|--------|\n"
         )
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     title_safe = title.replace("|", "/")[:60]
     summary_safe = summary.replace("|", "/")[:80]
     line = f"| {today} | {repo} | #{pr_number} | {author} | {title_safe} | {summary_safe} | {action} |\n"
@@ -497,7 +497,7 @@ def read_today_reviews(reviews_file: Path) -> list[dict]:
     """Read today's review entries from reviews.md."""
     if not reviews_file.exists():
         return []
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     entries = []
     for line in reviews_file.read_text().splitlines():
         if not line.startswith("|") or line.startswith("| Date") or line.startswith("|---"):
@@ -990,7 +990,7 @@ class TestApprovalCap(unittest.TestCase):
         import tempfile
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            today = datetime.now().strftime("%Y-%m-%d")
+            today = datetime.now(UTC).strftime("%Y-%m-%d")
             f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
             f.write("|------|------|-----|--------|-------|---------|--------|\n")
             f.write(f"| {today} | org/repo | #1 | dev | Fix | safe | approved |\n")
@@ -1082,7 +1082,7 @@ class TestReadTodayReviews(unittest.TestCase):
     def test_reads_today(self):
         import tempfile
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
             f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
             f.write("|------|------|-----|--------|-------|---------|--------|\n")
@@ -1302,7 +1302,7 @@ class TestRunReview(unittest.TestCase):
         with open(config_path, "w") as f:
             yaml.dump(config, f)
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         reviews_path.parent.mkdir(parents=True, exist_ok=True)
         reviews_path.write_text(
             "| Date | Repo | PR# | Author | Title | Summary | Action |\n"

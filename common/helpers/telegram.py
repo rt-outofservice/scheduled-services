@@ -68,7 +68,7 @@ def _split_message(message: str, max_len: int = 4000) -> list[str]:
             split_pos = max_len
 
         chunks.append(remaining[:split_pos])
-        remaining = remaining[split_pos:].lstrip("\n")
+        remaining = remaining[split_pos + 1 :] if split_pos < max_len else remaining[split_pos:]
 
     return chunks
 
