@@ -27,6 +27,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.error import URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import yaml
@@ -122,7 +123,7 @@ def shorten_url(url: str) -> tuple[str, str | None]:
     Returns (shortened_url, error). Falls back to original URL on failure.
     """
     try:
-        data = f"url={url}".encode()
+        data = urlencode({"url": url}).encode()
         req = Request(
             SPOO_ME_URL,
             data=data,

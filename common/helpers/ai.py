@@ -78,10 +78,14 @@ def _extract_json(text: str) -> str:
     fence_start = stripped.find("```")
     if fence_start != -1:
         after_fence = stripped[fence_start:]
-        lines = after_fence.split("\n")
-        # Remove first line (```json or ```) and last line (```)
-        lines = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
-        return "\n".join(lines).strip()
+        first_newline = after_fence.find("\n")
+        if first_newline == -1:
+            return stripped
+        content_start = first_newline + 1
+        closing_fence = after_fence.find("```", content_start)
+        if closing_fence != -1:
+            return after_fence[content_start:closing_fence].strip()
+        return after_fence[content_start:].strip()
 
     return stripped
 
@@ -176,5 +180,13 @@ if __name__ == "__main__":
             def test_with_preamble_and_plain_fence(self):
                 text = "Sure, here you go:\n```\n[1, 2, 3]\n```"
                 self.assertEqual(_extract_json(text), "[1, 2, 3]")
+
+            def test_with_trailing_text_after_fence(self):
+                text = '```json\n{"a": 1}\n```\nHope this helps!'
+                self.assertEqual(_extract_json(text), '{"a": 1}')
+
+            def test_with_preamble_and_trailing_text(self):
+                text = 'Here you go:\n```json\n{"a": 1}\n```\nLet me know if you need more.'
+                self.assertEqual(_extract_json(text), '{"a": 1}')
 
         unittest.main(argv=["", "-v"], exit=True)

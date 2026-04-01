@@ -106,12 +106,14 @@ def verify_api_access(provider: str, cli_wrappers: dict) -> str | None:
     if provider == "github":
         cmd = _wrap_cmd(["gh", "api", "user", "--jq", ".login"], cli_wrappers.get("gh"))
     elif provider == "gitlab":
-        cmd = _wrap_cmd(["glab", "api", "user", "--jq", ".username"], cli_wrappers.get("glab"))
+        cmd = _wrap_cmd(["glab", "api", "user"], cli_wrappers.get("glab"))
     else:
         return None
     try:
         result = _run_cmd(cmd)
         if result.returncode == 0 and result.stdout.strip():
+            if provider == "gitlab":
+                return json.loads(result.stdout).get("username", "")
             return result.stdout.strip()
     except Exception:
         pass
@@ -190,13 +192,14 @@ def _discover_gitlab_repos(org: str, cli_wrappers: dict, logger: logging.Logger)
     encoded_org = _encode_gitlab_path(org)
     api_path = f"groups/{encoded_org}/projects?order_by=last_activity_at&sort=desc&per_page=10"
     cmd = _wrap_cmd(
-        ["glab", "api", api_path, "--jq", ".[].path_with_namespace"],
+        ["glab", "api", api_path],
         cli_wrappers.get("glab"),
     )
     try:
         result = _run_cmd(cmd)
         if result.returncode == 0 and result.stdout.strip():
-            return [r.strip() for r in result.stdout.strip().split("\n") if r.strip()]
+            projects = json.loads(result.stdout)
+            return [p["path_with_namespace"] for p in projects if "path_with_namespace" in p]
     except Exception as e:
         logger.warning(f"GitLab repo discovery failed for {org}: {e}")
     return []
@@ -412,14 +415,19 @@ def get_diff(repo: str, pr_number: int, provider: str, cli_wrappers: dict) -> st
     elif provider == "gitlab":
         encoded = _encode_gitlab_path(repo)
         cmd = _wrap_cmd(
-            ["glab", "api", f"projects/{encoded}/merge_requests/{pr_number}/changes", "--jq", ".changes[].diff"],
+            ["glab", "api", f"projects/{encoded}/merge_requests/{pr_number}/changes"],
             cli_wrappers.get("glab"),
         )
     else:
         return ""
     try:
         result = _run_cmd(cmd, timeout=60)
-        return result.stdout if result.returncode == 0 else ""
+        if result.returncode != 0:
+            return ""
+        if provider == "gitlab":
+            data = json.loads(result.stdout)
+            return "\n".join(c.get("diff", "") for c in data.get("changes", []))
+        return result.stdout
     except Exception:
         return ""
 
@@ -787,7 +795,15 @@ class TestDiscoverRepos(unittest.TestCase):
 
     @patch.object(_mod, "_run_cmd")
     def test_gitlab_repos(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="group/proj1\ngroup/proj2\n")
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {"path_with_namespace": "group/proj1"},
+                    {"path_with_namespace": "group/proj2"},
+                ]
+            ),
+        )
         logger = MagicMock()
         repos = _discover_gitlab_repos("group", {}, logger)
         self.assertEqual(repos, ["group/proj1", "group/proj2"])
@@ -1409,7 +1425,7 @@ class TestVerifyAccess(unittest.TestCase):
 
     @patch.object(_mod, "_run_cmd")
     def test_gitlab_success(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=0, stdout="gluser\n")
+        mock_run.return_value = MagicMock(returncode=0, stdout=json.dumps({"username": "gluser"}))
         result = verify_api_access("gitlab", {})
         self.assertEqual(result, "gluser")
 
