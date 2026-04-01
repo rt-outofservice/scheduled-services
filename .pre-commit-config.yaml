@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.10
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.35.1
+    hooks:
+      - id: yamllint
+        args: [-d, "{extends: default, rules: {line-length: {max: 200}, truthy: disable}}"]
+
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+
+  - repo: local
+    hooks:
+      - id: embedded-tests
+        name: Run embedded Python tests
+        language: system
+        entry: bash -c 'for f in "$@"; do if grep -q "class.*unittest.TestCase" "$f" 2>/dev/null; then uv run python "$f" --tests || exit 1; fi; done'
+        types: [python]
+        pass_filenames: true

@@ -42,15 +42,15 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 - Create: `common/helpers/telegram.py`
 - Create: `common/helpers/ai.py`
 
-- [ ] Create `pyproject.toml` — uv project, Python >=3.11, runtime deps (pyyaml), dev deps (ruff, yamllint, pre-commit)
-- [ ] Create `.pre-commit-config.yaml` — hooks: ruff (lint + format), yamllint, shellcheck, custom hook running `--tests` on Python files that contain embedded test classes
-- [ ] Create `CLAUDE.md` — project conventions: directory layout, testing pattern, config.yaml generation approach, logging conventions, how `common/helpers/` imports work, error handling philosophy (never silent)
-- [ ] Create `common/helpers/__init__.py` — package init, re-exports key functions for convenience
-- [ ] Create `common/helpers/logging.py` — `setup_logging(service_name)` configures daily log file at `~/.logs/scheduled-services/<service_name>/<service_name>_MM-DD-YYYY.log`, keeps 30 most recent files per service (deletes older), returns configured `logging.Logger` and log file path. Redirects stdout/stderr to the log file as well.
-- [ ] Create `common/helpers/telegram.py` — `send_telegram(message, hostname="")` sources `tg()` from `~/.bash.d/telegram.bash` or `~/.zsh.d/telegram.zsh` and calls it via bash subprocess. Prepends `*hostname* — ` prefix when hostname is set. Auto-splits messages exceeding 4000 chars. Escapes Markdown V1 special chars (`*`, `_`, `` ` ``, `[`) in content portions.
-- [ ] Create `common/helpers/ai.py` — `call_ai(prompt, model="", timeout=600)` invokes `claude -p` subprocess, returns stdout. Raises `AIError` on non-zero exit. `call_ai_json(prompt, model="")` variant that parses JSON from response.
-- [ ] Write embedded tests for all three common helper modules
-- [ ] Run tests: `uv run python common/helpers/logging.py --tests && uv run python common/helpers/telegram.py --tests && uv run python common/helpers/ai.py --tests`
+- [x] Create `pyproject.toml` — uv project, Python >=3.11, runtime deps (pyyaml), dev deps (ruff, yamllint, pre-commit)
+- [x] Create `.pre-commit-config.yaml` — hooks: ruff (lint + format), yamllint, shellcheck, custom hook running `--tests` on Python files that contain embedded test classes
+- [x] Create `CLAUDE.md` — project conventions: directory layout, testing pattern, config.yaml generation approach, logging conventions, how `common/helpers/` imports work, error handling philosophy (never silent)
+- [x] Create `common/helpers/__init__.py` — package init, re-exports key functions for convenience
+- [x] Create `common/helpers/logging.py` — `setup_logging(service_name)` configures daily log file at `~/.logs/scheduled-services/<service_name>/<service_name>_MM-DD-YYYY.log`, keeps 30 most recent files per service (deletes older), returns configured `logging.Logger` and log file path. Redirects stdout/stderr to the log file as well.
+- [x] Create `common/helpers/telegram.py` — `send_telegram(message, hostname="")` sources `tg()` from `~/.bash.d/telegram.bash` or `~/.zsh.d/telegram.zsh` and calls it via bash subprocess. Prepends `*hostname* — ` prefix when hostname is set. Auto-splits messages exceeding 4000 chars. Escapes Markdown V1 special chars (`*`, `_`, `` ` ``, `[`) in content portions.
+- [x] Create `common/helpers/ai.py` — `call_ai(prompt, model="", timeout=600)` invokes `claude -p` subprocess, returns stdout. Raises `AIError` on non-zero exit. `call_ai_json(prompt, model="")` variant that parses JSON from response.
+- [x] Write embedded tests for all three common helper modules
+- [x] Run tests: `uv run python common/helpers/logging.py --tests && uv run python common/helpers/telegram.py --tests && uv run python common/helpers/ai.py --tests`
 
 ### Task 2: news-digest service
 
