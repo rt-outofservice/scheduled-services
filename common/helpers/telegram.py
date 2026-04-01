@@ -11,8 +11,8 @@ def send_telegram(message: str, hostname: str = "") -> None:
     calls it via bash subprocess.
 
     Args:
-        message: The message text to send. Markdown V1 special chars in content
-                 are escaped automatically.
+        message: The message text to send. Passed through as-is — callers are
+                 responsible for escaping Markdown V1 special chars if needed.
         hostname: If set, prepends "*hostname* \u2014 " prefix to the message.
     """
     if not message.strip():

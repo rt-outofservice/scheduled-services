@@ -372,13 +372,15 @@ def check_complexity(
     # For GitLab, stats aren't in the listing — fetch separately
     if provider == "gitlab" and files == 0 and lines == 0:
         files, lines = _fetch_gitlab_mr_stats(repo, pr_number, cli_wrappers, logger)
+        if files < 0:  # Stats fetch failed — fail closed
+            return False, 0, 0
 
     within = files <= MAX_FILES and lines <= MAX_LINES
     return within, files, lines
 
 
 def _fetch_gitlab_mr_stats(repo: str, mr_number: int, cli_wrappers: dict, logger: logging.Logger) -> tuple[int, int]:
-    """Fetch diff stats for a GitLab MR. Returns (files_changed, lines_changed)."""
+    """Fetch diff stats for a GitLab MR. Returns (files_changed, lines_changed) or (-1, -1) on failure."""
     encoded = _encode_gitlab_path(repo)
     cmd = _wrap_cmd(
         ["glab", "api", f"projects/{encoded}/merge_requests/{mr_number}/changes?access_raw_diffs=true"],
@@ -387,7 +389,7 @@ def _fetch_gitlab_mr_stats(repo: str, mr_number: int, cli_wrappers: dict, logger
     try:
         result = _run_cmd(cmd, timeout=60)
         if result.returncode != 0:
-            return 0, 0
+            return -1, -1
         data = json.loads(result.stdout)
         changes = data.get("changes", [])
         files = len(changes)
@@ -402,7 +404,7 @@ def _fetch_gitlab_mr_stats(repo: str, mr_number: int, cli_wrappers: dict, logger
         return files, lines
     except Exception as e:
         logger.warning(f"Failed to fetch MR stats for {repo}!{mr_number}: {e}")
-        return 0, 0
+        return -1, -1
 
 
 # --- AI review ---
