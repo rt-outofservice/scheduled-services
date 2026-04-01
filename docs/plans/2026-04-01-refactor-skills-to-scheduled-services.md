@@ -154,15 +154,15 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 **Files:**
 - Create: `scripts/migrate.sh`
 
-- [ ] Create `migrate.sh` — idempotent cleanup of old plugin-based system:
+- [x] Create `migrate.sh` — idempotent cleanup of old plugin-based system:
   1. Remove old crontab entries tagged `managed:claude-*` (parse and rewrite crontab)
   2. On macOS: `launchctl bootout` and delete plists matching `com.user.claude-*.plist` from `~/Library/LaunchAgents/`
   3. Remove old skills-wrapper at `~/.bin/claude-skills-wrapper/`
   4. Disable old claude-code plugins: `claude plugin disable digest git summary` (best-effort, continue on failure)
   5. Print summary of what was removed vs what was already absent
-- [ ] Script must be runnable standalone (`bash scripts/migrate.sh`) and via spot as an ad-hoc task
-- [ ] Ensure shellcheck compliance
-- [ ] Test idempotency: running twice produces no errors and "already clean" messages on second run
+- [x] Script must be runnable standalone (`bash scripts/migrate.sh`) and via spot as an ad-hoc task
+- [x] Ensure shellcheck compliance
+- [x] Test idempotency: running twice produces no errors and "already clean" messages on second run
 
 ### Task 7: Verify acceptance criteria
 
