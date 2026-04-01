@@ -530,11 +530,15 @@ def run_summary(config_path: Path) -> None:
 
     # Send via telegram
     try:
-        send_telegram(summary_text, hostname=hostname)
+        sent_ok = send_telegram(summary_text, hostname=hostname)
     except Exception as e:
         logger.error(f"Telegram send failed: {e}")
+        sent_ok = False
 
-    logger.info("Slack summary sent successfully")
+    if sent_ok:
+        logger.info("Slack summary sent successfully")
+    else:
+        logger.warning("Slack summary telegram delivery failed")
 
     # Cleanup
     shutil.rmtree(DUMP_DIR, ignore_errors=True)

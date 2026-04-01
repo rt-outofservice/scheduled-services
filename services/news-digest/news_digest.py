@@ -362,18 +362,22 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
 
         # Send via telegram
         try:
-            send_telegram(digest_text, hostname=hostname)
+            sent_ok = send_telegram(digest_text, hostname=hostname)
         except Exception as e:
             logger.error(f"Telegram send failed for group {group_name}: {e}")
+            sent_ok = False
 
-        # Log sent headlines for future dedup
-        for _feed_name, feed_data in group_feeds.get("feeds", {}).items():
-            if feed_data.get("error"):
-                continue
-            for item in feed_data.get("items", []):
-                title = item.get("title", "")
-                if title:
-                    logger.info(f"SENT_HEADLINE: {title}")
+        # Log sent headlines for future dedup (only if actually delivered)
+        if sent_ok:
+            for _feed_name, feed_data in group_feeds.get("feeds", {}).items():
+                if feed_data.get("error"):
+                    continue
+                for item in feed_data.get("items", []):
+                    title = item.get("title", "")
+                    if title:
+                        logger.info(f"SENT_HEADLINE: {title}")
+        else:
+            logger.warning(f"Skipping SENT_HEADLINE markers for group {group_name} — will retry next run")
 
         logger.info(f"Completed group: {group_name}")
 

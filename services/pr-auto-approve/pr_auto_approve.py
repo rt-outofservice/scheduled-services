@@ -679,6 +679,11 @@ def _run_review_loop(
                     warnings.append(f"AI failed for {repo}#{pr_number}")
                     continue
 
+                if not isinstance(ai_result, dict):
+                    logger.warning(f"AI returned non-dict for {repo}#{pr_number}: {type(ai_result).__name__}")
+                    warnings.append(f"AI unexpected response for {repo}#{pr_number}")
+                    continue
+
                 decision = ai_result.get("decision", "skip")
                 reason = ai_result.get("reason", "")
                 logger.info(f"AI decision for {repo}#{pr_number}: {decision} — {reason}")

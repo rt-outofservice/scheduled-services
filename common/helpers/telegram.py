@@ -4,7 +4,7 @@ import subprocess
 import sys
 
 
-def send_telegram(message: str, hostname: str = "") -> None:
+def send_telegram(message: str, hostname: str = "") -> bool:
     """Send a message via telegram using tg() from shell helpers.
 
     Sources tg() from ~/.bash.d/telegram.bash or ~/.zsh.d/telegram.zsh and
@@ -14,9 +14,12 @@ def send_telegram(message: str, hostname: str = "") -> None:
         message: The message text to send. Passed through as-is — callers are
                  responsible for escaping Markdown V1 special chars if needed.
         hostname: If set, prepends "*hostname* \u2014 " prefix to the message.
+
+    Returns:
+        True if all chunks were sent successfully, False if any chunk failed.
     """
     if not message.strip():
-        return
+        return True
 
     if hostname:
         escaped_hostname = _escape_markdown_v1(hostname)
@@ -27,8 +30,11 @@ def send_telegram(message: str, hostname: str = "") -> None:
     # Auto-split messages exceeding 4000 chars
     chunks = _split_message(full_message, max_len=4000)
 
+    success = True
     for chunk in chunks:
-        _send_chunk(chunk)
+        if not _send_chunk(chunk):
+            success = False
+    return success
 
 
 def _escape_markdown_v1(text: str) -> str:
@@ -67,8 +73,12 @@ def _split_message(message: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
-def _send_chunk(message: str) -> None:
-    """Send a single message chunk via tg() shell function."""
+def _send_chunk(message: str) -> bool:
+    """Send a single message chunk via tg() shell function.
+
+    Returns:
+        True on success, False on failure.
+    """
     script = 'source ~/.bash.d/telegram.bash 2>/dev/null || source ~/.zsh.d/telegram.zsh 2>/dev/null; tg "$1"'
     try:
         subprocess.run(
@@ -77,10 +87,12 @@ def _send_chunk(message: str) -> None:
             capture_output=True,
             timeout=30,
         )
+        return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         import logging
 
         logging.getLogger(__name__).error("Telegram send failed: %s", e)
+        return False
 
 
 # --- Embedded tests ---
@@ -140,49 +152,59 @@ if __name__ == "__main__":
                 self.assertEqual(result, [""])
 
         class TestSendTelegram(unittest.TestCase):
-            @patch("__main__._send_chunk")
+            @patch("__main__._send_chunk", return_value=True)
             def test_prepends_hostname(self, mock_send):
-                send_telegram("test msg", hostname="myhost")
+                result = send_telegram("test msg", hostname="myhost")
+                self.assertTrue(result)
                 mock_send.assert_called_once()
                 sent = mock_send.call_args[0][0]
                 self.assertTrue(sent.startswith("*myhost* \u2014 "))
 
-            @patch("__main__._send_chunk")
+            @patch("__main__._send_chunk", return_value=True)
             def test_no_hostname(self, mock_send):
-                send_telegram("test msg")
+                result = send_telegram("test msg")
+                self.assertTrue(result)
                 mock_send.assert_called_once()
                 sent = mock_send.call_args[0][0]
                 self.assertNotIn("\u2014", sent)
 
-            @patch("__main__._send_chunk")
+            @patch("__main__._send_chunk", return_value=True)
             def test_preserves_markdown_in_content(self, mock_send):
                 send_telegram("*bold*")
                 mock_send.assert_called_once()
                 sent = mock_send.call_args[0][0]
                 self.assertIn("*bold*", sent)
 
-            @patch("__main__._send_chunk")
+            @patch("__main__._send_chunk", return_value=True)
             def test_escapes_hostname_special_chars(self, mock_send):
                 send_telegram("test msg", hostname="my_server_01")
                 mock_send.assert_called_once()
                 sent = mock_send.call_args[0][0]
                 self.assertTrue(sent.startswith("*my\\_server\\_01* \u2014 "))
 
-            @patch("__main__._send_chunk")
+            @patch("__main__._send_chunk", return_value=True)
             def test_empty_message_skipped(self, mock_send):
-                send_telegram("   ")
+                result = send_telegram("   ")
+                self.assertTrue(result)
                 mock_send.assert_not_called()
 
-            @patch("__main__._send_chunk")
+            @patch("__main__._send_chunk", return_value=True)
             def test_auto_splits_long_message(self, mock_send):
                 long_msg = "a" * 5000
-                send_telegram(long_msg)
+                result = send_telegram(long_msg)
+                self.assertTrue(result)
                 self.assertGreater(mock_send.call_count, 1)
+
+            @patch("__main__._send_chunk", return_value=False)
+            def test_returns_false_on_chunk_failure(self, mock_send):
+                result = send_telegram("test msg")
+                self.assertFalse(result)
 
         class TestSendChunk(unittest.TestCase):
             @patch("subprocess.run")
             def test_calls_bash_with_tg(self, mock_run):
-                _send_chunk("hello")
+                result = _send_chunk("hello")
+                self.assertTrue(result)
                 mock_run.assert_called_once()
                 args = mock_run.call_args
                 self.assertEqual(args[0][0][0], "bash")
@@ -190,13 +212,13 @@ if __name__ == "__main__":
                 self.assertTrue(args[1]["check"])
 
             @patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "bash"))
-            def test_logs_error_on_failure(self, mock_run):
-                # Should not raise - logs instead
-                _send_chunk("hello")
+            def test_returns_false_on_failure(self, mock_run):
+                result = _send_chunk("hello")
+                self.assertFalse(result)
 
             @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("bash", 30))
-            def test_logs_error_on_timeout(self, mock_run):
-                # Should not raise - logs instead
-                _send_chunk("hello")
+            def test_returns_false_on_timeout(self, mock_run):
+                result = _send_chunk("hello")
+                self.assertFalse(result)
 
         unittest.main(argv=["", "-v"], exit=True)

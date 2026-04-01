@@ -22,6 +22,6 @@ repos:
       - id: embedded-tests
         name: Run embedded Python tests
         language: system
-        entry: bash -c 'for f in "$@"; do if grep -q "class.*unittest.TestCase" "$f" 2>/dev/null; then uv run python "$f" --tests || exit 1; fi; done'
+        entry: bash -c 'for f in "$@"; do if grep -q "class.*unittest.TestCase" "$f" 2>/dev/null; then uv run python "$f" --tests || exit 1; fi; done' _
         types: [python]
         pass_filenames: true
