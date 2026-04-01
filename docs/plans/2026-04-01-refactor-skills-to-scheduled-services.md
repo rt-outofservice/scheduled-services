@@ -166,11 +166,11 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] Run full test suite across all Python files with embedded tests
-- [ ] Run ruff lint and format check: `uv run ruff check . && uv run ruff format --check .`
-- [ ] Run yamllint on all YAML files: `yamllint playbook.main.yaml env.example-main.yml`
-- [ ] Run shellcheck on migration script: `shellcheck scripts/migrate.sh`
-- [ ] Run pre-commit on all files: `pre-commit run --all-files`
+- [x] Run full test suite across all Python files with embedded tests
+- [x] Run ruff lint and format check: `uv run ruff check . && uv run ruff format --check .`
+- [x] Run yamllint on all YAML files: `yamllint playbook.main.yaml env.example-main.yml`
+- [x] Run shellcheck on migration script: `shellcheck scripts/migrate.sh`
+- [x] Run pre-commit on all files: `pre-commit run --all-files`
 
 ### Task 8: Update documentation
 
