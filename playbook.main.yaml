@@ -226,7 +226,7 @@ tasks:
             while IFS= read -r line; do
               [[ "$line" == \#* || -z "$line" ]] && continue
               # Skip variable assignments (e.g. SHELL=/bin/bash, PATH=..., MAILTO="")
-              local before_space="${line%% *}"
+              before_space="${line%% *}"
               [[ "$before_space" == *=* ]] && continue
               if ! echo "$line" | grep -qE '^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+'; then
                 echo "ERROR: invalid cron syntax: $line" >&2
