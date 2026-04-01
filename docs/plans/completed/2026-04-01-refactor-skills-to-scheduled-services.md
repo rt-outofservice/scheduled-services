@@ -174,5 +174,5 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 
 ### Task 8: Update documentation
 
-- [ ] Update README.md with: project overview, directory structure, how to add a new service, deployment instructions (`spot -p playbook.main.yaml -E env.<host>-main.yml`), how to run tests locally, migration steps
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update README.md with: project overview, directory structure, how to add a new service, deployment instructions (`spot -p playbook.main.yaml -E env.<host>-main.yml`), how to run tests locally, migration steps
+- [x] Move this plan to `docs/plans/completed/`
