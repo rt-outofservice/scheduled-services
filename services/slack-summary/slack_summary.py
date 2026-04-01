@@ -404,6 +404,8 @@ def build_ai_prompt(
 
 def truncate_message(message: str, max_len: int = 4000) -> str:
     """Truncate message from the bottom if it exceeds max_len."""
+    if max_len < 80:
+        max_len = 80
     if len(message) <= max_len:
         return message
     truncated = message[: max_len - 40]
