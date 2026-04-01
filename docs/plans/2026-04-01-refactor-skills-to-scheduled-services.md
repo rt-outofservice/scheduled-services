@@ -103,7 +103,7 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 - Create: `services/pr-auto-approve/pr_auto_approve.py`
 - Create: `services/pr-auto-approve/.bindeps`
 
-- [ ] Create `pr_auto_approve.py` — main script with two modes controlled by CLI args:
+- [x] Create `pr_auto_approve.py` — main script with two modes controlled by CLI args:
   - `--day-summary-only`: read today's entries from `reviews.md`, compose and send end-of-day telegram summary grouped by repo, then exit. Called by a separate cron entry at end of day.
   - Default (no flag): normal review mode (steps below)
   - `--tests`: run tests and exit
@@ -121,9 +121,9 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
   9. Append every reviewed PR/MR to `~/.scheduled-services/services/pr-auto-approve/reviews.md` (append-only markdown table: date, repo, PR#, author, title, summary, action)
   10. Cleanup: if glab wrapper was started, run `<wrapper> --stop-proxy`
   11. If any warnings were collected (API errors for certain orgs, AI failures for certain PRs), log all and include brief summary in any telegram notifications
-- [ ] Create `.bindeps` — contains: `gh` and `glab`
-- [ ] Write embedded tests: repo discovery parsing (mocked gh/glab JSON output), PR filtering (bots, drafts, own username), complexity gate (parse diff stat output), approval cap enforcement, review log append format, AI response JSON parsing, day-summary formatting, warning collection
-- [ ] Run tests: `uv run python services/pr-auto-approve/pr_auto_approve.py --tests`
+- [x] Create `.bindeps` — contains: `gh` and `glab`
+- [x] Write embedded tests: repo discovery parsing (mocked gh/glab JSON output), PR filtering (bots, drafts, own username), complexity gate (parse diff stat output), approval cap enforcement, review log append format, AI response JSON parsing, day-summary formatting, warning collection
+- [x] Run tests: `uv run python services/pr-auto-approve/pr_auto_approve.py --tests`
 
 ### Task 5: Spot playbook and environment config
 
