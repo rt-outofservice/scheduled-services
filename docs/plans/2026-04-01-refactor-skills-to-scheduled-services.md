@@ -59,8 +59,8 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 - Create: `services/news-digest/fetch_feeds.py` (adapted from existing plugin)
 - Create: `services/news-digest/.bindeps`
 
-- [ ] Adapt `fetch_feeds.py` from `/Users/rt/Projects/claude-code-plugins/digest/scripts/fetch-feeds.py`. Keep RSS/Atom parsing, date handling, time-window filtering. Make it importable as a module (`fetch_all(groups_dict, hours) -> dict`) while keeping CLI entry point. Preserve and adapt existing tests.
-- [ ] Create `news_digest.py` — main script:
+- [x] Adapt `fetch_feeds.py` from `/Users/rt/Projects/claude-code-plugins/digest/scripts/fetch-feeds.py`. Keep RSS/Atom parsing, date handling, time-window filtering. Make it importable as a module (`fetch_all(groups_dict, hours) -> dict`) while keeping CLI entry point. Preserve and adapt existing tests.
+- [x] Create `news_digest.py` — main script:
   1. Parse CLI args: `--digest-names` (comma-separated list of digest group names to process; if omitted, process all groups from config), `--tests` (run tests and exit)
   2. Load `config.yaml` (hostname, feed groups with lang/mode/subcategories settings, hours window per group)
   3. Filter feed groups to only those matching `--digest-names` if provided
@@ -70,9 +70,9 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
   7. Call AI (`claude -p`) per group with fetched items as JSON — prompt specifies: language, output format (detailed: cross-source analysis with headlines + URLs; summary: narrative per subcategory), max length constraints
   8. Send each group's digest via `send_telegram()`, truncate from bottom if >4000 chars. Append a brief warnings section at the end if any feeds/URLs failed (e.g. "Note: 2 feeds unavailable, URL shortener failed for 3 links")
   9. Fatal errors (config missing, all feeds in a group failed, AI call failed) — log and send telegram error notification immediately
-- [ ] Create `.bindeps` — empty file (no external binary deps)
-- [ ] Write embedded tests: config loading, `--digest-names` filtering, dedup matching, URL shortening (mocked HTTP), message truncation, AI prompt construction, warning collection/formatting
-- [ ] Run tests: `uv run python services/news-digest/news_digest.py --tests`
+- [x] Create `.bindeps` — empty file (no external binary deps)
+- [x] Write embedded tests: config loading, `--digest-names` filtering, dedup matching, URL shortening (mocked HTTP), message truncation, AI prompt construction, warning collection/formatting
+- [x] Run tests: `uv run python services/news-digest/news_digest.py --tests`
 
 ### Task 3: slack-summary service
 
