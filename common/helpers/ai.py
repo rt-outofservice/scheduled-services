@@ -37,6 +37,8 @@ def call_ai(prompt: str, model: str = "", timeout: int = 600) -> str:
         )
     except subprocess.TimeoutExpired:
         raise AIError(f"claude -p timed out after {timeout}s") from None
+    except FileNotFoundError:
+        raise AIError("claude binary not found — is it installed and on PATH?") from None
 
     if result.returncode != 0:
         stderr = result.stderr.strip()
@@ -133,6 +135,13 @@ if __name__ == "__main__":
                 with self.assertRaises(AIError) as ctx:
                     call_ai("prompt")
                 self.assertIn("timed out", str(ctx.exception))
+
+            @patch("subprocess.run")
+            def test_file_not_found_raises_ai_error(self, mock_run):
+                mock_run.side_effect = FileNotFoundError()
+                with self.assertRaises(AIError) as ctx:
+                    call_ai("prompt")
+                self.assertIn("not found", str(ctx.exception))
 
         class TestCallAIJson(unittest.TestCase):
             @patch("__main__.call_ai")

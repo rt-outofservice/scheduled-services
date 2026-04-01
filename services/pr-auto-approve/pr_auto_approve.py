@@ -20,12 +20,13 @@ Config (config.yaml):
     approval_cap: 2
 """
 
+import fcntl
 import json
 import logging
 import subprocess
 import sys
 import unittest
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from urllib.parse import quote as urlquote
@@ -39,6 +40,7 @@ from log import setup_logging
 from telegram import send_telegram
 
 REVIEWS_FILE = Path.home() / ".scheduled-services" / "services" / "pr-auto-approve" / "reviews.md"
+LOCK_FILE = Path.home() / ".scheduled-services" / "services" / "pr-auto-approve" / ".lock"
 MAX_FILES = 7
 MAX_LINES = 300
 DEFAULT_APPROVAL_CAP = 2
@@ -486,7 +488,7 @@ def append_review(
             "| Date | Repo | PR# | Author | Title | Summary | Action |\n"
             "|------|------|-----|--------|-------|---------|--------|\n"
         )
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     title_safe = title.replace("|", "/")[:60]
     summary_safe = summary.replace("|", "/")[:80]
     line = f"| {today} | {repo} | #{pr_number} | {author} | {title_safe} | {summary_safe} | {action} |\n"
@@ -498,7 +500,7 @@ def read_today_reviews(reviews_file: Path) -> list[dict]:
     """Read today's review entries from reviews.md."""
     if not reviews_file.exists():
         return []
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     entries = []
     for line in reviews_file.read_text().splitlines():
         if not line.startswith("|") or line.startswith("| Date") or line.startswith("|---"):
@@ -556,6 +558,22 @@ def run_review(config_path: Path) -> None:
     logger, _log_file = setup_logging("pr-auto-approve")
     logger.info("Starting pr-auto-approve service (review mode)")
 
+    # Acquire exclusive lock to prevent concurrent runs from exceeding approval_cap
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(LOCK_FILE, "w") as lock_fp:
+        try:
+            fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            logger.info("Another pr-auto-approve instance is running, exiting")
+            return
+        try:
+            _run_review_inner(config_path, logger)
+        finally:
+            fcntl.flock(lock_fp, fcntl.LOCK_UN)
+
+
+def _run_review_inner(config_path: Path, logger: logging.Logger) -> None:
+    """Review flow after lock is acquired."""
     try:
         config = load_config(config_path)
     except (FileNotFoundError, ValueError) as e:
@@ -975,7 +993,7 @@ class TestApprovalCap(unittest.TestCase):
         import tempfile
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            today = datetime.now(UTC).strftime("%Y-%m-%d")
+            today = datetime.now().strftime("%Y-%m-%d")
             f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
             f.write("|------|------|-----|--------|-------|---------|--------|\n")
             f.write(f"| {today} | org/repo | #1 | dev | Fix | safe | approved |\n")
@@ -1067,7 +1085,7 @@ class TestReadTodayReviews(unittest.TestCase):
     def test_reads_today(self):
         import tempfile
 
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
             f.write("| Date | Repo | PR# | Author | Title | Summary | Action |\n")
             f.write("|------|------|-----|--------|-------|---------|--------|\n")
@@ -1184,7 +1202,8 @@ class TestRunReview(unittest.TestCase):
             }
         ]
 
-        with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+        lock_path = Path(tmpdir) / ".lock"
+        with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
             run_review(config_path)
 
         mock_ai.assert_called_once()
@@ -1212,7 +1231,13 @@ class TestRunReview(unittest.TestCase):
         mock_logger = MagicMock(spec=logging.Logger)
         mock_log.return_value = (mock_logger, Path(tempfile.mktemp(suffix=".log")))
 
-        run_review(Path("/nonexistent/config.yaml"))
+        tmpdir = tempfile.mkdtemp()
+        lock_path = Path(tmpdir) / ".lock"
+        with patch.object(_mod, "LOCK_FILE", lock_path):
+            run_review(Path("/nonexistent/config.yaml"))
+        import shutil
+
+        shutil.rmtree(tmpdir)
 
         mock_logger.error.assert_called()
         fatal_calls = [c for c in mock_tg.call_args_list if "FATAL" in str(c)]
@@ -1253,7 +1278,8 @@ class TestRunReview(unittest.TestCase):
             {**pr_base, "number": 2, "title": "PR2"},
         ]
 
-        with patch.object(_mod, "REVIEWS_FILE", reviews_path):
+        lock_path = Path(tmpdir) / ".lock"
+        with patch.object(_mod, "REVIEWS_FILE", reviews_path), patch.object(_mod, "LOCK_FILE", lock_path):
             run_review(config_path)
 
         # Only 1 approval due to cap
@@ -1279,7 +1305,7 @@ class TestRunReview(unittest.TestCase):
         with open(config_path, "w") as f:
             yaml.dump(config, f)
 
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
         reviews_path.parent.mkdir(parents=True, exist_ok=True)
         reviews_path.write_text(
             "| Date | Repo | PR# | Author | Title | Summary | Action |\n"

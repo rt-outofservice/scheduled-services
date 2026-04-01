@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -33,8 +34,8 @@ from ai import AIError, call_ai
 from log import setup_logging
 from telegram import send_telegram
 
-DUMP_DIR = Path("/tmp/slack-summary")
-AUTH_TEST_DIR = Path("/tmp/slack-auth-test")
+DUMP_DIR_PREFIX = "slack-summary-"
+AUTH_TEST_DIR_PREFIX = "slack-auth-test-"
 AUTH_RETRY_INTERVAL = 60  # seconds
 AUTH_MAX_RETRIES = 10
 CHANNEL_DUMP_DELAY = 5  # seconds between channel dumps
@@ -86,11 +87,11 @@ def validate_slackdump_auth(first_channel: str, logger: logging.Logger) -> bool:
 
     Returns True if auth is valid.
     """
-    AUTH_TEST_DIR.mkdir(parents=True, exist_ok=True)
+    auth_test_dir = Path(tempfile.mkdtemp(prefix=AUTH_TEST_DIR_PREFIX))
     try:
         now_ts = format_timestamp_iso(datetime.now(UTC))
         result = subprocess.run(
-            ["slackdump", "dump", "-time-from", now_ts, "-o", str(AUTH_TEST_DIR), first_channel],
+            ["slackdump", "dump", "-time-from", now_ts, "-o", str(auth_test_dir), first_channel],
             capture_output=True,
             text=True,
             timeout=60,
@@ -106,7 +107,7 @@ def validate_slackdump_auth(first_channel: str, logger: logging.Logger) -> bool:
         logger.error("slackdump binary not found")
         return False
     finally:
-        shutil.rmtree(AUTH_TEST_DIR, ignore_errors=True)
+        shutil.rmtree(auth_test_dir, ignore_errors=True)
 
 
 def validate_auth_with_retries(
@@ -141,14 +142,14 @@ def validate_auth_with_retries(
     return False
 
 
-def dump_channel(channel_id: str, time_from: str, logger: logging.Logger) -> str | None:
+def dump_channel(channel_id: str, time_from: str, dump_dir: Path, logger: logging.Logger) -> str | None:
     """Dump a single channel via slackdump.
 
     Returns the path to the JSON file on success, None on failure.
     """
     try:
         result = subprocess.run(
-            ["slackdump", "dump", "-time-from", time_from, "-o", str(DUMP_DIR), channel_id],
+            ["slackdump", "dump", "-time-from", time_from, "-o", str(dump_dir), channel_id],
             capture_output=True,
             text=True,
             timeout=300,
@@ -157,11 +158,11 @@ def dump_channel(channel_id: str, time_from: str, logger: logging.Logger) -> str
             logger.warning(f"slackdump dump failed for {channel_id}: {result.stderr.strip()}")
             return None
         # slackdump creates <channel_id>.json in the output dir
-        json_path = DUMP_DIR / f"{channel_id}.json"
+        json_path = dump_dir / f"{channel_id}.json"
         if json_path.exists():
             return str(json_path)
         # Some versions may nest differently — look for any json
-        for f in DUMP_DIR.glob(f"{channel_id}*.json"):
+        for f in dump_dir.glob(f"{channel_id}*.json"):
             return str(f)
         logger.warning(f"No JSON output found for channel {channel_id}")
         return None
@@ -176,6 +177,7 @@ def dump_channel(channel_id: str, time_from: str, logger: logging.Logger) -> str
 def dump_all_channels(
     channels: list[str],
     time_from: str,
+    dump_dir: Path,
     logger: logging.Logger,
     sleep_fn=time.sleep,
 ) -> tuple[dict[str, str], list[str]]:
@@ -183,7 +185,6 @@ def dump_all_channels(
 
     Returns (channel_files, warnings) where channel_files maps channel_id to json path.
     """
-    DUMP_DIR.mkdir(parents=True, exist_ok=True)
     channel_files: dict[str, str] = {}
     warnings: list[str] = []
 
@@ -191,7 +192,7 @@ def dump_all_channels(
         if i > 0:
             sleep_fn(CHANNEL_DUMP_DELAY)
         logger.info(f"Dumping channel {channel_id} ({i + 1}/{len(channels)})")
-        json_path = dump_channel(channel_id, time_from, logger)
+        json_path = dump_channel(channel_id, time_from, dump_dir, logger)
         if json_path:
             channel_files[channel_id] = json_path
         else:
@@ -203,19 +204,20 @@ def dump_all_channels(
 BOT_SUBTYPES = {"bot_message", "bot_add", "bot_remove"}
 
 
-def parse_channel_messages(json_path: str, logger: logging.Logger) -> tuple[dict, list[dict]]:
+def parse_channel_messages(json_path: str, logger: logging.Logger) -> tuple[dict, list[dict], str]:
     """Parse a slackdump channel JSON file.
 
-    Returns (channel_info, messages) where:
+    Returns (channel_info, messages, error) where:
     - channel_info has 'channel_id' and 'name'
     - messages is a list of {user, text, ts} dicts
+    - error is a non-empty string if parsing failed, empty string otherwise
     """
     try:
         with open(json_path) as f:
             data = json.load(f)
     except (json.JSONDecodeError, OSError) as e:
         logger.warning(f"Failed to parse {json_path}: {e}")
-        return {}, []
+        return {}, [], str(e)
 
     channel_info = {
         "channel_id": data.get("channel_id", ""),
@@ -241,7 +243,7 @@ def parse_channel_messages(json_path: str, logger: logging.Logger) -> tuple[dict
             }
         )
 
-    return channel_info, parsed
+    return channel_info, parsed, ""
 
 
 def get_user_cache_path() -> Path:
@@ -465,23 +467,26 @@ def run_summary(config_path: Path) -> None:
     if not validate_auth_with_retries(channels[0], hostname, logger):
         return
 
-    # Dump channels
-    DUMP_DIR.mkdir(parents=True, exist_ok=True)
-    channel_files, warnings = dump_all_channels(channels, time_from, logger)
+    # Dump channels into a unique temp directory
+    dump_dir = Path(tempfile.mkdtemp(prefix=DUMP_DIR_PREFIX))
+    channel_files, warnings = dump_all_channels(channels, time_from, dump_dir, logger)
 
     if not channel_files:
         logger.error("All channel dumps failed")
         send_telegram("slack-summary FATAL: all channel dumps failed", hostname=hostname)
-        shutil.rmtree(DUMP_DIR, ignore_errors=True)
+        shutil.rmtree(dump_dir, ignore_errors=True)
         return
 
     # Parse messages
     all_user_ids: set[str] = set()
     channels_data: list[dict] = []
     for channel_id, json_path in channel_files.items():
-        channel_info, messages = parse_channel_messages(json_path, logger)
+        channel_info, messages, parse_error = parse_channel_messages(json_path, logger)
+        if parse_error:
+            warnings.append(f"Parse error for {channel_id}: {parse_error}")
         if not messages:
-            logger.info(f"No messages in channel {channel_id}")
+            if not parse_error:
+                logger.info(f"No messages in channel {channel_id}")
             continue
         # Collect user IDs for resolution
         for msg in messages:
@@ -500,9 +505,11 @@ def run_summary(config_path: Path) -> None:
 
     if not channels_data:
         logger.info("No messages found in any channel")
-        send_telegram("slack-summary: no messages found in the configured timeframe", hostname=hostname)
+        msg = "slack-summary: no messages found in the configured timeframe"
+        msg += format_warnings(warnings)
+        send_telegram(msg, hostname=hostname)
         # Cleanup
-        shutil.rmtree(DUMP_DIR, ignore_errors=True)
+        shutil.rmtree(dump_dir, ignore_errors=True)
         return
 
     # Resolve user IDs
@@ -519,7 +526,7 @@ def run_summary(config_path: Path) -> None:
     except AIError as e:
         logger.error(f"AI call failed: {e}")
         send_telegram(f"slack-summary FATAL: AI call failed: {e}", hostname=hostname)
-        shutil.rmtree(DUMP_DIR, ignore_errors=True)
+        shutil.rmtree(dump_dir, ignore_errors=True)
         return
 
     # Append warnings
@@ -541,7 +548,7 @@ def run_summary(config_path: Path) -> None:
         logger.warning("Slack summary telegram delivery failed")
 
     # Cleanup
-    shutil.rmtree(DUMP_DIR, ignore_errors=True)
+    shutil.rmtree(dump_dir, ignore_errors=True)
     logger.info("slack-summary service finished")
 
 
@@ -661,7 +668,6 @@ class TestFormatTimestampIso(unittest.TestCase):
 
 class TestValidateSlackdumpAuth(unittest.TestCase):
     @patch("subprocess.run")
-    @patch.object(_mod, "AUTH_TEST_DIR", Path("/tmp/test-slack-auth"))
     def test_success(self, mock_run):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
         logger = MagicMock(spec=logging.Logger)
@@ -669,7 +675,6 @@ class TestValidateSlackdumpAuth(unittest.TestCase):
         self.assertTrue(result)
 
     @patch("subprocess.run")
-    @patch.object(_mod, "AUTH_TEST_DIR", Path("/tmp/test-slack-auth"))
     def test_failure(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="auth expired")
         logger = MagicMock(spec=logging.Logger)
@@ -677,7 +682,6 @@ class TestValidateSlackdumpAuth(unittest.TestCase):
         self.assertFalse(result)
 
     @patch("subprocess.run")
-    @patch.object(_mod, "AUTH_TEST_DIR", Path("/tmp/test-slack-auth"))
     def test_timeout(self, mock_run):
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="slackdump", timeout=60)
         logger = MagicMock(spec=logging.Logger)
@@ -685,7 +689,6 @@ class TestValidateSlackdumpAuth(unittest.TestCase):
         self.assertFalse(result)
 
     @patch("subprocess.run")
-    @patch.object(_mod, "AUTH_TEST_DIR", Path("/tmp/test-slack-auth"))
     def test_binary_not_found(self, mock_run):
         mock_run.side_effect = FileNotFoundError()
         logger = MagicMock(spec=logging.Logger)
@@ -738,12 +741,13 @@ class TestParseChannelMessages(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
             f.flush()
-            info, msgs = parse_channel_messages(f.name, MagicMock())
+            info, msgs, err = parse_channel_messages(f.name, MagicMock())
         self.assertEqual(info["channel_id"], "C01ABC")
         self.assertEqual(info["name"], "general")
         self.assertEqual(len(msgs), 2)
         self.assertEqual(msgs[0]["user"], "U123")
         self.assertEqual(msgs[0]["text"], "hello world")
+        self.assertEqual(err, "")
         Path(f.name).unlink()
 
     def test_filters_bot_messages(self):
@@ -761,7 +765,7 @@ class TestParseChannelMessages(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
             f.flush()
-            _, msgs = parse_channel_messages(f.name, MagicMock())
+            _, msgs, _ = parse_channel_messages(f.name, MagicMock())
         self.assertEqual(len(msgs), 1)
         self.assertEqual(msgs[0]["text"], "human msg")
         Path(f.name).unlink()
@@ -780,7 +784,7 @@ class TestParseChannelMessages(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
             f.flush()
-            _, msgs = parse_channel_messages(f.name, MagicMock())
+            _, msgs, _ = parse_channel_messages(f.name, MagicMock())
         self.assertEqual(len(msgs), 1)
         Path(f.name).unlink()
 
@@ -798,7 +802,7 @@ class TestParseChannelMessages(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
             f.flush()
-            _, msgs = parse_channel_messages(f.name, MagicMock())
+            _, msgs, _ = parse_channel_messages(f.name, MagicMock())
         self.assertEqual(len(msgs), 0)
         Path(f.name).unlink()
 
@@ -808,9 +812,10 @@ class TestParseChannelMessages(unittest.TestCase):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             f.write("not valid json")
             f.flush()
-            info, msgs = parse_channel_messages(f.name, MagicMock())
+            info, msgs, err = parse_channel_messages(f.name, MagicMock())
         self.assertEqual(info, {})
         self.assertEqual(msgs, [])
+        self.assertNotEqual(err, "")
         Path(f.name).unlink()
 
 
@@ -1083,6 +1088,7 @@ class TestRunSummary(unittest.TestCase):
         mock_parse.return_value = (
             {"channel_id": "C01ABC", "name": "general"},
             [{"user": "U123", "text": "hello world", "ts": "1.0"}],
+            "",
         )
 
         run_summary(config_path)
@@ -1184,8 +1190,7 @@ class TestDumpChannel(unittest.TestCase):
         json_file.write_text('{"messages": []}')
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
-        with patch.object(_mod, "DUMP_DIR", dump_dir):
-            result = dump_channel("C01ABC", "2026-04-01T00:00:00", MagicMock())
+        result = dump_channel("C01ABC", "2026-04-01T00:00:00", dump_dir, MagicMock())
         self.assertIsNotNone(result)
         shutil.rmtree(dump_dir)
 
@@ -1196,8 +1201,7 @@ class TestDumpChannel(unittest.TestCase):
         dump_dir = Path(tempfile.mkdtemp())
         mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="error")
 
-        with patch.object(_mod, "DUMP_DIR", dump_dir):
-            result = dump_channel("C01ABC", "2026-04-01T00:00:00", MagicMock())
+        result = dump_channel("C01ABC", "2026-04-01T00:00:00", dump_dir, MagicMock())
         self.assertIsNone(result)
         shutil.rmtree(dump_dir)
 
@@ -1211,13 +1215,13 @@ class TestDumpAllChannels(unittest.TestCase):
         mock_dump.return_value = str(dump_dir / "C01.json")
         sleep_calls = []
 
-        with patch.object(_mod, "DUMP_DIR", dump_dir):
-            files, warnings = dump_all_channels(
-                ["C01", "C02"],
-                "2026-04-01T00:00:00",
-                MagicMock(),
-                sleep_fn=lambda s: sleep_calls.append(s),
-            )
+        files, warnings = dump_all_channels(
+            ["C01", "C02"],
+            "2026-04-01T00:00:00",
+            dump_dir,
+            MagicMock(),
+            sleep_fn=lambda s: sleep_calls.append(s),
+        )
         self.assertEqual(len(files), 2)
         self.assertEqual(len(warnings), 0)
         self.assertEqual(len(sleep_calls), 1)  # sleep between channels
@@ -1230,13 +1234,13 @@ class TestDumpAllChannels(unittest.TestCase):
         dump_dir = Path(tempfile.mkdtemp())
         mock_dump.return_value = None
 
-        with patch.object(_mod, "DUMP_DIR", dump_dir):
-            files, warnings = dump_all_channels(
-                ["C01"],
-                "2026-04-01T00:00:00",
-                MagicMock(),
-                sleep_fn=lambda _: None,
-            )
+        files, warnings = dump_all_channels(
+            ["C01"],
+            "2026-04-01T00:00:00",
+            dump_dir,
+            MagicMock(),
+            sleep_fn=lambda _: None,
+        )
         self.assertEqual(len(files), 0)
         self.assertEqual(len(warnings), 1)
         shutil.rmtree(dump_dir)
