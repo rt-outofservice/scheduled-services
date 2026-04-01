@@ -353,8 +353,10 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
             continue
 
         # Truncate AI text first, then append warnings so warnings survive
+        # Account for hostname prefix added by send_telegram
         warning_text = format_warnings(warnings)
-        digest_text = truncate_message(digest_text, max_len=4000 - len(warning_text))
+        prefix_len = len(f"*{hostname}* — ") if hostname else 0
+        digest_text = truncate_message(digest_text, max_len=4000 - len(warning_text) - prefix_len)
         digest_text += warning_text
 
         # Send via telegram
