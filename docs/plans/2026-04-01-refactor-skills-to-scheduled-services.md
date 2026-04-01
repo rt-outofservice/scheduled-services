@@ -80,7 +80,7 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 - Create: `services/slack-summary/slack_summary.py`
 - Create: `services/slack-summary/.bindeps`
 
-- [ ] Create `slack_summary.py` — main script:
+- [x] Create `slack_summary.py` — main script:
   1. Parse CLI args: `--tests` (run tests and exit)
   2. Load `config.yaml` (hostname, channels list, timeframe, user_id)
   3. Validate slackdump auth: test dump against first channel with `-time-from` set to now (zero messages). On failure: send telegram asking user to re-auth, retry every 60s up to 10 times, send success/give-up notification
@@ -93,9 +93,9 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
   10. Format and send via `send_telegram()`, split if >4000 chars. Append warnings section if any channels failed to dump or had parse errors.
   11. Clean up `/tmp/slack-summary/`
   12. Fatal errors (slackdump auth permanently failed, config missing) — log and send telegram error notification immediately
-- [ ] Create `.bindeps` — contains: `slackdump`
-- [ ] Write embedded tests: auth validation flow (mocked subprocess), message parsing/filtering, user cache read/write, mention detection, DM detection, timestamp computation, warning collection
-- [ ] Run tests: `uv run python services/slack-summary/slack_summary.py --tests`
+- [x] Create `.bindeps` — contains: `slackdump`
+- [x] Write embedded tests: auth validation flow (mocked subprocess), message parsing/filtering, user cache read/write, mention detection, DM detection, timestamp computation, warning collection
+- [x] Run tests: `uv run python services/slack-summary/slack_summary.py --tests`
 
 ### Task 4: pr-auto-approve service
 
