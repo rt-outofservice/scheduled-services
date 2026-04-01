@@ -370,7 +370,7 @@ def check_complexity(
     if provider == "gitlab" and files == 0 and lines == 0:
         files, lines = _fetch_gitlab_mr_stats(repo, pr_number, cli_wrappers, logger)
         if files < 0:  # Stats fetch failed — fail closed
-            return False, 0, 0
+            return False, -1, -1
 
     within = files <= MAX_FILES and lines <= MAX_LINES
     return within, files, lines
@@ -667,8 +667,14 @@ def _run_review_loop(
 
                 within, files, lines = check_complexity(pr, repo, pr_number, provider, cli_wrappers, logger)
                 if not within:
-                    logger.info(f"Too complex: {repo}#{pr_number} ({files} files, {lines} lines)")
-                    summary = f"{files} files, {lines} lines"
+                    if files < 0:
+                        logger.info(f"Stats unavailable: {repo}#{pr_number}, skipping")
+                        summary = "stats unavailable"
+                        action = "skipped-stats"
+                    else:
+                        logger.info(f"Too complex: {repo}#{pr_number} ({files} files, {lines} lines)")
+                        summary = f"{files} files, {lines} lines"
+                        action = "skipped-complexity"
                     append_review(
                         reviews_file,
                         repo,
@@ -676,7 +682,7 @@ def _run_review_loop(
                         pr["author"],
                         pr["title"],
                         summary,
-                        "skipped-complexity",
+                        action,
                     )
                     continue
 
@@ -1009,6 +1015,15 @@ if __name__ == "__main__":
                 logger = MagicMock()
                 within, files, lines = check_complexity(pr_data, "group/proj", 1, "gitlab", {}, logger)
                 self.assertFalse(within)
+
+            @patch.object(_mod, "_fetch_gitlab_mr_stats", return_value=(-1, -1))
+            def test_gitlab_stats_failure_returns_sentinel(self, mock_fetch):
+                pr_data = {"changed_files": 0, "additions": 0, "deletions": 0}
+                logger = MagicMock()
+                within, files, lines = check_complexity(pr_data, "group/proj", 1, "gitlab", {}, logger)
+                self.assertFalse(within)
+                self.assertEqual(files, -1)
+                self.assertEqual(lines, -1)
 
             def test_boundary_at_limits(self):
                 pr_data = {"changed_files": MAX_FILES, "additions": MAX_LINES, "deletions": 0}
