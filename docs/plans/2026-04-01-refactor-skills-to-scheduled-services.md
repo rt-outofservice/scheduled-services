@@ -131,13 +131,13 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
 - Create: `playbook.main.yaml`
 - Create: `env.example-main.yml`
 
-- [ ] Create `env.example-main.yml` — documented example. Per-service variables use two keys:
+- [x] Create `env.example-main.yml` — documented example. Per-service variables use two keys:
   - `SERVICE_CONFIG: |` — raw YAML content that gets written verbatim to `config.yaml` for that service
   - `CRON_SCHEDULE: |` — raw crontab content (one or more lines) written verbatim into the crontab. This allows multiple entries per service (e.g. every 30 min for normal runs + one end-of-day entry with `--day-summary-only`). Each line is a standard cron expression + command.
   - Per-service enable flag (e.g. `NEWS_DIGEST_ENABLED: true`)
   - Example showing news-digest with multiple cron entries for different `--digest-names` at different schedules
   - Example showing pr-auto-approve with a regular interval entry + a separate `--day-summary-only` entry
-- [ ] Create `playbook.main.yaml` with task groups:
+- [x] Create `playbook.main.yaml` with task groups:
   1. **preflight**: verify playbook directory, compute deploy version (`git log -1 --format='%h@%cs'`)
   2. **validate-deps**: for each enabled service, read its `.bindeps` file and verify each binary exists via `command -v`. Also verify `uv`, `yq`, `python3` are present. Fail with clear message listing all missing tools. Use spot `script` command — no dependency installation.
   3. **deploy-files**: use spot `sync` to copy `common/`, enabled `services/<name>/` directories, and `pyproject.toml` to `~/.scheduled-services/`. Use spot `copy` for the deploy version file.
@@ -145,9 +145,9 @@ Migrate three Claude Code plugins (news-digest, pr-auto-approve, slack-summary) 
   5. **generate-configs**: for each enabled service, write the `SERVICE_CONFIG` value as-is to `~/.scheduled-services/services/<name>/config.yaml`. Use `yq` only for validation (valid YAML check), not for assembly.
   6. **configure-crontab**: for each enabled service, take its `CRON_SCHEDULE` content and install it into crontab under tagged blocks (`# BEGIN managed:scheduled-<service>` / `# END managed:scheduled-<service>`). Remove stale tagged blocks before adding new ones. Validate cron syntax via `crontab -T` on Linux; on macOS do basic regex validation of the 5-field schedule. Each cron command should be: `cd ~/.scheduled-services && uv run python services/<name>/<script>.py <args>`.
   7. **notify-completion**: send telegram with deploy version and list of enabled services
-- [ ] Use spot built-in commands (`copy`, `sync`) wherever possible; minimize bash in `script` blocks
-- [ ] Use YAML anchor `&on_error` for shared telegram error handler across all task groups
-- [ ] Validate playbook syntax: `spot -p playbook.main.yaml --dry` (or equivalent check)
+- [x] Use spot built-in commands (`copy`, `sync`) wherever possible; minimize bash in `script` blocks
+- [x] Use YAML anchor `&on_error` for shared telegram error handler across all task groups
+- [x] Validate playbook syntax: `spot -p playbook.main.yaml --dry` (or equivalent check)
 
 ### Task 6: Migration script
 

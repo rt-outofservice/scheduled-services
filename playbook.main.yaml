@@ -1,0 +1,253 @@
+# Scheduled Services deployment playbook for spot (https://github.com/umputun/spot)
+#
+# Usage:
+#   cd /path/to/scheduled-services
+#   spot -p playbook.main.yaml -E env.<host>-main.yml
+#
+# Environment variables per service (defined in env file):
+#   <PREFIX>_ENABLED: "true"/"false"       - enable deployment
+#   <PREFIX>_SERVICE_CONFIG: |             - raw YAML for config.yaml
+#   <PREFIX>_CRON_SCHEDULE: |              - raw crontab entries
+#
+# Services: news-digest (NEWS_DIGEST), slack-summary (SLACK_SUMMARY),
+#           pr-auto-approve (PR_AUTO_APPROVE)
+
+user: rt
+inventory: ../../inventory.yml
+local_shell: /bin/bash
+
+targets:
+  all_hosts: {groups: ["homelab", "gear"]}
+
+tasks:
+  # ── Preflight ──────────────────────────────────────────────
+  - name: preflight
+    commands:
+      - name: verify-playbook-dir
+        script: |
+          if [[ ! -d common/helpers ]]; then
+            echo "ERROR: run this playbook from the scheduled-services directory" >&2
+            exit 1
+          fi
+        options: {local: true}
+
+      - name: compute-deploy-version
+        script: |
+          version=$(git log -1 --format='%h@%cs' -- . 2>/dev/null || echo "unknown")
+          [[ -z "$version" ]] && version="unknown"
+          echo "$version" > /tmp/.sched-svc-version
+          echo "Deploy version: $version"
+        options: {local: true}
+
+  # ── Validate Dependencies ──────────────────────────────────
+  - name: validate-deps
+    on_error: &on_error |
+      /bin/bash -c 'source ~/.bash.d/telegram.bash 2>/dev/null || source ~/.zsh.d/telegram.zsh 2>/dev/null; tg "⛔ *{SPOT_REMOTE_NAME}* — _scheduled-services_ failed at {SPOT_TASK}"' || true
+    commands:
+      - name: copy-bindeps
+        copy:
+          - {src: "services/news-digest/.bindeps", dst: "/tmp/.bindeps-news-digest"}
+          - {src: "services/slack-summary/.bindeps", dst: "/tmp/.bindeps-slack-summary"}
+          - {src: "services/pr-auto-approve/.bindeps", dst: "/tmp/.bindeps-pr-auto-approve"}
+        on_exit: "rm -f /tmp/.bindeps-news-digest /tmp/.bindeps-slack-summary /tmp/.bindeps-pr-auto-approve"
+
+      - name: check-required-tools
+        script: |
+          missing=()
+          for tool in uv yq python3; do
+            command -v "$tool" &>/dev/null || missing+=("$tool")
+          done
+
+          for svc in news-digest slack-summary pr-auto-approve; do
+            prefix=$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')
+            enabled_var="${prefix}_ENABLED"
+            if [[ "${!enabled_var:-false}" == "true" ]]; then
+              bindeps="/tmp/.bindeps-${svc}"
+              if [[ -f "$bindeps" ]]; then
+                while IFS= read -r dep || [[ -n "$dep" ]]; do
+                  dep=$(echo "$dep" | xargs)
+                  [[ -z "$dep" || "$dep" == \#* ]] && continue
+                  command -v "$dep" &>/dev/null || missing+=("$dep (required by $svc)")
+                done < "$bindeps"
+              fi
+            fi
+          done
+
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "ERROR: missing required tools:" >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+          echo "All required tools present"
+
+  # ── Deploy Files ───────────────────────────────────────────
+  - name: deploy-files
+    on_error: *on_error
+    commands:
+      - name: sync-project
+        sync:
+          src: "."
+          dst: "/tmp/.sched-svc-deploy/"
+          exclude: ["__pycache__", ".venv", ".git", ".ruff_cache", ".ralphex",
+                    "docs", "scripts", ".pre-commit-config.yaml",
+                    "CLAUDE.md", "README.md", "env.*", "playbook.*"]
+        on_exit: "rm -rf /tmp/.sched-svc-deploy/"
+
+      - name: install-project-files
+        script: |
+          mkdir -p ~/.scheduled-services
+          rsync -a --delete \
+            --exclude '__pycache__' \
+            --exclude '*.pyc' \
+            --exclude 'config.yaml' \
+            --exclude '.version' \
+            /tmp/.sched-svc-deploy/ ~/.scheduled-services/
+
+      - name: deploy-version
+        copy: {src: "/tmp/.sched-svc-version", dst: "/tmp/.sched-svc-version"}
+        on_exit: "rm -f /tmp/.sched-svc-version"
+
+      - name: install-version
+        script: |
+          version=$(cat /tmp/.sched-svc-version 2>/dev/null || echo "unknown")
+          echo "$version" > ~/.scheduled-services/.version
+          echo "Deployed version: $version"
+
+  # ── Setup Virtual Environment ──────────────────────────────
+  - name: setup-venv
+    on_error: *on_error
+    commands:
+      - name: uv-sync
+        script: cd ~/.scheduled-services && uv sync --native-tls
+
+  # ── Generate Configs ───────────────────────────────────────
+  - name: generate-configs
+    on_error: *on_error
+    commands:
+      - name: write-service-configs
+        script: |
+          write_config() {
+            local svc="$1" prefix="$2"
+            local config_var="${prefix}_SERVICE_CONFIG"
+            local config_content="${!config_var:-}"
+            local config_path="$HOME/.scheduled-services/services/$svc/config.yaml"
+
+            if [[ -z "$config_content" ]]; then
+              echo "$svc: no SERVICE_CONFIG — skipping"
+              return 0
+            fi
+
+            mkdir -p "$(dirname "$config_path")"
+            printf '%s\n' "$config_content" > "$config_path"
+            chmod 600 "$config_path"
+
+            if ! yq '.' "$config_path" > /dev/null 2>&1; then
+              echo "ERROR: $svc config.yaml is not valid YAML" >&2
+              yq '.' "$config_path" >&2
+              rm -f "$config_path"
+              exit 1
+            fi
+
+            echo "$svc: config.yaml written and validated"
+          }
+
+          [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && write_config "news-digest" "NEWS_DIGEST"
+          [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && write_config "slack-summary" "SLACK_SUMMARY"
+          [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && write_config "pr-auto-approve" "PR_AUTO_APPROVE"
+          echo "Config generation complete"
+
+  # ── Configure Crontab ─────────────────────────────────────
+  - name: configure-crontab
+    on_error: *on_error
+    commands:
+      - name: update-crontab
+        script: |
+          current=$(crontab -l 2>/dev/null || true)
+
+          # Remove all managed:scheduled-* tagged blocks
+          cleaned=$(printf '%s\n' "$current" | awk '
+            /^# BEGIN managed:scheduled-/ { skip=1; next }
+            /^# END managed:scheduled-/   { skip=0; next }
+            !skip { print }
+          ')
+
+          new_entries=""
+          add_schedule() {
+            local svc="$1" prefix="$2"
+            local cron_var="${prefix}_CRON_SCHEDULE"
+            local cron_content="${!cron_var:-}"
+            local enabled_var="${prefix}_ENABLED"
+
+            if [[ "${!enabled_var:-false}" != "true" || -z "$cron_content" ]]; then
+              return 0
+            fi
+
+            new_entries+="# BEGIN managed:scheduled-${svc}"$'\n'
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              [[ -z "$line" ]] && continue
+              new_entries+="${line}"$'\n'
+            done <<< "$cron_content"
+            new_entries+="# END managed:scheduled-${svc}"$'\n'
+            echo "$svc: cron schedule added"
+          }
+
+          add_schedule "news-digest" "NEWS_DIGEST"
+          add_schedule "slack-summary" "SLACK_SUMMARY"
+          add_schedule "pr-auto-approve" "PR_AUTO_APPROVE"
+
+          # Combine: cleaned existing + new managed entries
+          final="$cleaned"
+          if [[ -n "$new_entries" ]]; then
+            [[ -n "$final" ]] && final="${final}"$'\n'
+            final="${final}${new_entries}"
+          fi
+
+          # Trim trailing blank lines
+          final=$(printf '%s' "$final" | sed -e :a -e '/^\n*$/{$d;N;ba;}')
+
+          # Validate cron syntax
+          platform=$(uname -s | tr '[:upper:]' '[:lower:]')
+          if [[ "$platform" == "linux" ]]; then
+            if printf '%s\n' "$final" | crontab -T - 2>/dev/null; then
+              echo "Crontab validated (crontab -T)"
+            else
+              echo "WARNING: crontab -T unavailable — skipping syntax validation"
+            fi
+          else
+            # macOS: basic regex validation of 5-field cron schedule
+            while IFS= read -r line; do
+              [[ "$line" == \#* || -z "$line" ]] && continue
+              if ! echo "$line" | grep -qE '^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+'; then
+                echo "ERROR: invalid cron syntax: $line" >&2
+                exit 1
+              fi
+            done <<< "$final"
+            echo "Crontab validated (regex)"
+          fi
+
+          # Install new crontab
+          printf '%s\n' "$final" | crontab -
+          echo "Crontab updated"
+
+  # ── Completion Notification ────────────────────────────────
+  - name: notify-completion
+    commands:
+      - name: send-completion-notification
+        script: |
+          tg_loaded=false
+          for f in ~/.bash.d/telegram.bash ~/.zsh.d/telegram.zsh; do
+            [ -f "$f" ] && . "$f" && tg_loaded=true && break
+          done
+          if $tg_loaded; then
+            name="{SPOT_REMOTE_NAME}"
+            [ -z "$name" ] && name=$(hostname -s)
+            ver=$(cat ~/.scheduled-services/.version 2>/dev/null || echo "unknown")
+
+            enabled=""
+            [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && enabled="${enabled}news-digest "
+            [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && enabled="${enabled}slack-summary "
+            [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && enabled="${enabled}pr-auto-approve "
+            enabled="${enabled% }"
+
+            tg "✅ *${name}* — _scheduled-services_ deployed (${ver}): ${enabled:-none}" || true
+          fi
