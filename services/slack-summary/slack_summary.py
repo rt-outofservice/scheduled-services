@@ -333,17 +333,6 @@ def get_display_name(user_id: str, cache: dict[str, str]) -> str:
     return f"@{name}" if name else f"@{user_id}"
 
 
-def detect_mentions(messages: list[dict], user_id: str) -> list[dict]:
-    """Find messages that mention the given user_id.
-
-    Returns messages containing <@user_id> pattern.
-    """
-    if not user_id:
-        return []
-    pattern = f"<@{user_id}>"
-    return [msg for msg in messages if pattern in msg.get("text", "")]
-
-
 def is_dm_channel(channel_id: str) -> bool:
     """Check if a channel ID is a DM (starts with D)."""
     return channel_id.startswith("D")
@@ -911,27 +900,6 @@ class TestResolveUsers(unittest.TestCase):
         self.assertNotIn("*", result.get("U123", ""))
         self.assertNotIn("_", result.get("U123", ""))
         cache_path.unlink()
-
-
-class TestMentionDetection(unittest.TestCase):
-    def test_detects_mention(self):
-        messages = [
-            {"text": "hey <@U123> can you check this?", "user": "U456", "ts": "1.0"},
-            {"text": "sure thing", "user": "U123", "ts": "2.0"},
-        ]
-        mentions = detect_mentions(messages, "U123")
-        self.assertEqual(len(mentions), 1)
-        self.assertIn("<@U123>", mentions[0]["text"])
-
-    def test_no_mentions(self):
-        messages = [{"text": "just chatting", "user": "U456", "ts": "1.0"}]
-        mentions = detect_mentions(messages, "U123")
-        self.assertEqual(len(mentions), 0)
-
-    def test_empty_user_id(self):
-        messages = [{"text": "<@U123> hello", "user": "U456", "ts": "1.0"}]
-        mentions = detect_mentions(messages, "")
-        self.assertEqual(len(mentions), 0)
 
 
 class TestIsDmChannel(unittest.TestCase):

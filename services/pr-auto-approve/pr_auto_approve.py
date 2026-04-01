@@ -330,19 +330,16 @@ def is_already_approved(
     """Check if we already approved this PR/MR."""
     if provider == "github":
         cmd = _wrap_cmd(
-            [
-                "gh",
-                "api",
-                f"repos/{repo}/pulls/{pr_number}/reviews",
-                "--jq",
-                f'[.[] | select(.user.login == "{own_username}" and .state == "APPROVED")] | length',
-            ],
+            ["gh", "api", f"repos/{repo}/pulls/{pr_number}/reviews"],
             cli_wrappers.get("gh"),
         )
         try:
             result = _run_cmd(cmd)
             if result.returncode == 0:
-                return int(result.stdout.strip() or "0") > 0
+                reviews = json.loads(result.stdout)
+                return any(
+                    r.get("user", {}).get("login") == own_username and r.get("state") == "APPROVED" for r in reviews
+                )
         except Exception:
             pass
     elif provider == "gitlab":
