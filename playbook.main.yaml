@@ -101,6 +101,9 @@ tasks:
             --exclude '*.pyc' \
             --exclude 'config.yaml' \
             --exclude '.version' \
+            --exclude 'reviews.md' \
+            --exclude 'user-cache.txt' \
+            --exclude '.venv' \
             /tmp/.sched-svc-deploy/ ~/.scheduled-services/
 
       - name: deploy-version
@@ -208,10 +211,15 @@ tasks:
           # Validate cron syntax
           platform=$(uname -s | tr '[:upper:]' '[:lower:]')
           if [[ "$platform" == "linux" ]]; then
-            if printf '%s\n' "$final" | crontab -T - 2>/dev/null; then
+            validation_output=$(printf '%s\n' "$final" | crontab -T - 2>&1)
+            rc=$?
+            if [[ $rc -eq 0 ]]; then
               echo "Crontab validated (crontab -T)"
-            else
+            elif echo "$validation_output" | grep -qi "invalid option\|unknown option\|unrecognized option\|illegal option"; then
               echo "WARNING: crontab -T unavailable — skipping syntax validation"
+            else
+              echo "ERROR: crontab syntax validation failed: $validation_output" >&2
+              exit 1
             fi
           else
             # macOS: basic regex validation of 5-field cron schedule

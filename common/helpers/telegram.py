@@ -70,12 +70,17 @@ def _split_message(message: str, max_len: int = 4000) -> list[str]:
 def _send_chunk(message: str) -> None:
     """Send a single message chunk via tg() shell function."""
     script = 'source ~/.bash.d/telegram.bash 2>/dev/null || source ~/.zsh.d/telegram.zsh 2>/dev/null; tg "$1"'
-    subprocess.run(
-        ["bash", "-c", script, "bash", message],
-        check=True,
-        capture_output=True,
-        timeout=30,
-    )
+    try:
+        subprocess.run(
+            ["bash", "-c", script, "bash", message],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        import logging
+
+        logging.getLogger(__name__).error("Telegram send failed: %s", e)
 
 
 # --- Embedded tests ---
@@ -183,5 +188,15 @@ if __name__ == "__main__":
                 self.assertEqual(args[0][0][0], "bash")
                 self.assertEqual(args[0][0][-1], "hello")
                 self.assertTrue(args[1]["check"])
+
+            @patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "bash"))
+            def test_logs_error_on_failure(self, mock_run):
+                # Should not raise - logs instead
+                _send_chunk("hello")
+
+            @patch("subprocess.run", side_effect=subprocess.TimeoutExpired("bash", 30))
+            def test_logs_error_on_timeout(self, mock_run):
+                # Should not raise - logs instead
+                _send_chunk("hello")
 
         unittest.main(argv=["", "-v"], exit=True)

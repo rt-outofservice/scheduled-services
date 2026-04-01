@@ -485,8 +485,8 @@ def append_review(
             "|------|------|-----|--------|-------|---------|--------|\n"
         )
     today = datetime.now(UTC).strftime("%Y-%m-%d")
-    title_safe = title.replace("|", "\\|")[:60]
-    summary_safe = summary.replace("|", "\\|")[:80]
+    title_safe = title.replace("|", "/")[:60]
+    summary_safe = summary.replace("|", "/")[:80]
     line = f"| {today} | {repo} | #{pr_number} | {author} | {title_safe} | {summary_safe} | {action} |\n"
     with open(reviews_file, "a") as f:
         f.write(line)
@@ -1025,14 +1025,15 @@ class TestReviewLog(unittest.TestCase):
 
         shutil.rmtree(tmpdir)
 
-    def test_escapes_pipes_in_title(self):
+    def test_replaces_pipes_in_title(self):
         import tempfile
 
         tmpdir = tempfile.mkdtemp()
         reviews_file = Path(tmpdir) / "reviews.md"
         append_review(reviews_file, "org/repo", 1, "dev", "Fix | bar", "ok", "approved")
         content = reviews_file.read_text()
-        self.assertIn("Fix \\| bar", content)
+        self.assertIn("Fix / bar", content)
+        self.assertNotIn("Fix | bar", content.split("\n")[-2])
         import shutil
 
         shutil.rmtree(tmpdir)

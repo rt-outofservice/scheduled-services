@@ -472,6 +472,7 @@ def run_summary(config_path: Path) -> None:
     if not channel_files:
         logger.error("All channel dumps failed")
         send_telegram("slack-summary FATAL: all channel dumps failed", hostname=hostname)
+        shutil.rmtree(DUMP_DIR, ignore_errors=True)
         return
 
     # Parse messages
