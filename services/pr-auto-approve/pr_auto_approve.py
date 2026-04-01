@@ -485,8 +485,8 @@ def append_review(
             "|------|------|-----|--------|-------|---------|--------|\n"
         )
     today = datetime.now(UTC).strftime("%Y-%m-%d")
-    title_safe = title.replace("|", "/")[:60]
-    summary_safe = summary.replace("|", "/")[:80]
+    title_safe = title.replace("\n", " ").replace("|", "/")[:60]
+    summary_safe = summary.replace("\n", " ").replace("|", "/")[:80]
     line = f"| {today} | {repo} | #{pr_number} | {author} | {title_safe} | {summary_safe} | {action} |\n"
     with open(reviews_file, "a") as f:
         f.write(line)
