@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import contextlib
 import os
 import re
 import subprocess
@@ -29,7 +30,10 @@ CRON_FIELD_RE = re.compile(r"^[0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,-]+\s+[0-9*/,-]+\
 
 def read_crontab():
     """Read the current user crontab. Returns empty string if none."""
-    result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    try:
+        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    except FileNotFoundError:
+        return ""
     if result.returncode != 0:
         return ""
     return result.stdout
@@ -131,7 +135,8 @@ def install_crontab(crontab_text):
 
 def clear_crontab():
     """Remove the user's crontab entirely."""
-    subprocess.run(["crontab", "-r"], capture_output=True)
+    with contextlib.suppress(FileNotFoundError):
+        subprocess.run(["crontab", "-r"], capture_output=True)
 
 
 # ── Main workflow ──────────────────────────────────────────────────
@@ -407,6 +412,18 @@ class TestEmptyCrontabEdgeCase(unittest.TestCase):
         update_crontab([("svc", "SVC")])
         mock_clear.assert_called_once()
         mock_install.assert_not_called()
+
+
+class TestReadCrontabMissingBinary(unittest.TestCase):
+    @patch("subprocess.run", side_effect=FileNotFoundError("crontab"))
+    def test_returns_empty_when_no_crontab_binary(self, mock_run):
+        self.assertEqual(read_crontab(), "")
+
+
+class TestClearCrontabMissingBinary(unittest.TestCase):
+    @patch("subprocess.run", side_effect=FileNotFoundError("crontab"))
+    def test_no_error_when_no_crontab_binary(self, mock_run):
+        clear_crontab()  # should not raise
 
 
 class TestValidateCronSyntaxSubprocess(unittest.TestCase):

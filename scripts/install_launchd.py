@@ -175,7 +175,10 @@ def install_service(svc, prefix, template, prefix_tag, agents_dir):
         print(f"{svc}: no LAUNCHD_SCHEDULE — skipping")
         return
 
-    jobs = yaml.safe_load(schedule_raw)
+    try:
+        jobs = yaml.safe_load(schedule_raw)
+    except yaml.YAMLError as e:
+        raise RuntimeError(f"{svc} LAUNCHD_SCHEDULE is not valid YAML: {e}") from None
     if not isinstance(jobs, list) or len(jobs) == 0:
         raise RuntimeError(f"{svc} LAUNCHD_SCHEDULE has no jobs")
 
@@ -475,6 +478,17 @@ class TestErrorCases(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             install_service("svc", "TEST", "tpl", "tag", "/tmp")
         self.assertIn("no jobs", str(ctx.exception))
+
+    @patch("__main__.remove_existing_agents")
+    @patch.dict(
+        os.environ,
+        {"TEST_ENABLED": "true", "TEST_LAUNCHD_SCHEDULE": "{ invalid yaml ["},
+    )
+    def test_malformed_yaml_raises_clean_error(self, mock_remove):
+        with self.assertRaises(RuntimeError) as ctx:
+            install_service("svc", "TEST", "tpl", "tag", "/tmp")
+        self.assertIn("not valid YAML", str(ctx.exception))
+        self.assertIn("svc", str(ctx.exception))
 
     @patch("__main__.remove_existing_agents")
     @patch.dict(

@@ -10,9 +10,7 @@ class AIError(Exception):
     """Raised when an LLM call fails."""
 
 
-def call_ai(
-    prompt: str, provider: str = "claude", model: str = "", effort: str = "", timeout: int = 600
-) -> str:
+def call_ai(prompt: str, provider: str = "claude", model: str = "", effort: str = "", timeout: int = 600) -> str:
     """Invoke an LLM provider and return the text response.
 
     Args:
@@ -98,7 +96,8 @@ def _call_codex(prompt: str, model: str = "", effort: str = "", timeout: int = 6
         import os
 
         try:
-            output = open(out_path).read().strip()
+            with open(out_path) as f:
+                output = f.read().strip()
             os.unlink(out_path)
         except OSError:
             output = ""
@@ -134,7 +133,6 @@ def _extract_json(text: str) -> str:
 # --- Embedded tests ---
 if __name__ == "__main__":
     if "--tests" in sys.argv:
-        import os
         import unittest
         from unittest.mock import MagicMock, patch
 
@@ -230,9 +228,8 @@ if __name__ == "__main__":
                     mock_open.return_value.__enter__ = lambda s: s
                     mock_open.return_value.__exit__ = MagicMock(return_value=False)
                     mock_open.return_value.read = MagicMock(return_value="")
-                    with patch("os.unlink"):
-                        with self.assertRaises(AIError) as ctx:
-                            _call_codex("prompt")
+                    with patch("os.unlink"), self.assertRaises(AIError) as ctx:
+                        _call_codex("prompt")
                 self.assertIn("timed out", str(ctx.exception))
 
         class TestCallAIJson(unittest.TestCase):
