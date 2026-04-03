@@ -95,9 +95,9 @@ When multiple files for the same channel have overlapping time windows, all are 
 - Modify: `playbook.main.yaml`
 - Modify: `env.example-main.yml`
 
-- [ ] Add teams-summary service block to playbook.main.yaml following the exact pattern of existing services (config generation from env var, cron injection, .bindeps validation)
-- [ ] Add `TEAMS_SUMMARY_ENABLED`, `TEAMS_SUMMARY_SERVICE_CONFIG`, `TEAMS_SUMMARY_CRON_SCHEDULE` entries to env.example-main.yml with example config showing all options (data_dir, timeframe, channels, hostname, llm_provider, llm_model)
-- [ ] Write tests: verify config.yaml example is valid YAML, verify all required config keys are present in example
+- [x] Add teams-summary service block to playbook.main.yaml following the exact pattern of existing services (config generation from env var, cron injection, .bindeps validation)
+- [x] Add `TEAMS_SUMMARY_ENABLED`, `TEAMS_SUMMARY_SERVICE_CONFIG`, `TEAMS_SUMMARY_CRON_SCHEDULE` entries to env.example-main.yml with example config showing all options (data_dir, timeframe, channels, hostname, llm_provider, llm_model)
+- [x] Write tests: verify config.yaml example is valid YAML, verify all required config keys are present in example
 
 ### Task 6: Verify acceptance criteria
 

@@ -1120,6 +1120,38 @@ if __name__ == "__main__":
                 self.assertNotIn("\\[", msg)
                 self.assertIn("*Teams Alert*", msg)
 
+        class TestEnvExampleConfig(unittest.TestCase):
+            """Verify the example config in env.example-main.yml is valid and complete."""
+
+            def setUp(self):
+                self.env_path = Path(__file__).resolve().parents[2] / "env.example-main.yml"
+
+            def test_example_config_is_valid_yaml(self):
+                env = yaml.safe_load(self.env_path.read_text())
+                config_str = env["vars"]["TEAMS_SUMMARY_SERVICE_CONFIG"]
+                config = yaml.safe_load(config_str)
+                self.assertIsInstance(config, dict)
+
+            def test_example_config_has_required_keys(self):
+                env = yaml.safe_load(self.env_path.read_text())
+                config_str = env["vars"]["TEAMS_SUMMARY_SERVICE_CONFIG"]
+                config = yaml.safe_load(config_str)
+                self.assertIn("data_dir", config)
+                self.assertIn("timeframe", config)
+
+            def test_example_config_loads_via_load_config(self):
+                env = yaml.safe_load(self.env_path.read_text())
+                config_str = env["vars"]["TEAMS_SUMMARY_SERVICE_CONFIG"]
+                tmp = Path(tempfile.mkdtemp()) / "config.yaml"
+                tmp.write_text(config_str)
+                try:
+                    config = load_config(tmp)
+                    self.assertEqual(config["data_dir"], "/path/to/teams/json-dumps")
+                    self.assertEqual(config["timeframe"], "14h")
+                finally:
+                    tmp.unlink()
+                    tmp.parent.rmdir()
+
         unittest.main(argv=[sys.argv[0]], exit=True)
     else:
         main()

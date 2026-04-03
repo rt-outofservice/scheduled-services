@@ -10,7 +10,7 @@
 #   <PREFIX>_CRON_SCHEDULE: |              - raw crontab entries
 #
 # Services: news-digest (NEWS_DIGEST), slack-summary (SLACK_SUMMARY),
-#           pr-auto-approve (PR_AUTO_APPROVE)
+#           pr-auto-approve (PR_AUTO_APPROVE), teams-summary (TEAMS_SUMMARY)
 
 user: rt
 inventory: inventory.yml
@@ -49,7 +49,8 @@ tasks:
           - {src: "services/news-digest/.bindeps", dst: "/tmp/.bindeps-news-digest"}
           - {src: "services/slack-summary/.bindeps", dst: "/tmp/.bindeps-slack-summary"}
           - {src: "services/pr-auto-approve/.bindeps", dst: "/tmp/.bindeps-pr-auto-approve"}
-        on_exit: "rm -f /tmp/.bindeps-news-digest /tmp/.bindeps-slack-summary /tmp/.bindeps-pr-auto-approve"
+          - {src: "services/teams-summary/.bindeps", dst: "/tmp/.bindeps-teams-summary"}
+        on_exit: "rm -f /tmp/.bindeps-news-digest /tmp/.bindeps-slack-summary /tmp/.bindeps-pr-auto-approve /tmp/.bindeps-teams-summary"
 
       - name: check-required-tools
         script: |
@@ -59,7 +60,7 @@ tasks:
             command -v "$tool" &>/dev/null || missing+=("$tool")
           done
 
-          for svc in news-digest slack-summary pr-auto-approve; do
+          for svc in news-digest slack-summary pr-auto-approve teams-summary; do
             prefix=$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')
             enabled_var="${prefix}_ENABLED"
             if [[ "${!enabled_var:-false}" == "true" ]]; then
@@ -164,6 +165,7 @@ tasks:
           [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && write_config "news-digest" "NEWS_DIGEST"
           [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && write_config "slack-summary" "SLACK_SUMMARY"
           [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && write_config "pr-auto-approve" "PR_AUTO_APPROVE"
+          [[ "${TEAMS_SUMMARY_ENABLED:-false}" == "true" ]] && write_config "teams-summary" "TEAMS_SUMMARY"
           echo "Config generation complete"
 
   # ── Configure Crontab ─────────────────────────────────────
@@ -206,6 +208,7 @@ tasks:
           add_schedule "news-digest" "NEWS_DIGEST"
           add_schedule "slack-summary" "SLACK_SUMMARY"
           add_schedule "pr-auto-approve" "PR_AUTO_APPROVE"
+          add_schedule "teams-summary" "TEAMS_SUMMARY"
 
           # Combine: cleaned existing + new managed entries
           final="$cleaned"
@@ -273,6 +276,7 @@ tasks:
             [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && enabled="${enabled}news-digest "
             [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && enabled="${enabled}slack-summary "
             [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && enabled="${enabled}pr-auto-approve "
+            [[ "${TEAMS_SUMMARY_ENABLED:-false}" == "true" ]] && enabled="${enabled}teams-summary "
             enabled="${enabled% }"
 
             tg "✅ *${name}* — _scheduled-services_ deployed (${ver}): ${enabled:-none}" || true
