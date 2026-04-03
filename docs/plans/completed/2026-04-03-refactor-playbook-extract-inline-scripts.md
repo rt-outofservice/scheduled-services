@@ -123,4 +123,4 @@ Replace large inline scripts with calls to new Python scripts. Compress all rema
 
 ### Task 7: Update documentation
 
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Move this plan to `docs/plans/completed/`
