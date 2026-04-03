@@ -15,6 +15,7 @@ Config (config.yaml):
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -31,6 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common" / "helpers
 from ai import AIError, call_ai
 from log import setup_logging
 from telegram import send_telegram
+
+# Allow slackdump to read unencrypted credentials (needed for non-interactive/cron use)
+os.environ.setdefault("DISABLE_ENCRYPTION", "1")
 
 DUMP_DIR_PREFIX = "slack-summary-"
 AUTH_TEST_DIR_PREFIX = "slack-auth-test-"

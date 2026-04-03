@@ -7,10 +7,17 @@
 # Environment variables per service (defined in env file):
 #   <PREFIX>_ENABLED: "true"/"false"       - enable deployment
 #   <PREFIX>_SERVICE_CONFIG: |             - raw YAML for config.yaml
-#   <PREFIX>_CRON_SCHEDULE: |              - raw crontab entries
+#   <PREFIX>_CRON_SCHEDULE: |              - raw crontab entries (linux services)
+#   <PREFIX>_LAUNCHD_SCHEDULE: |           - launchd schedule entries (macOS services)
+#
+# Platform requirements:
+#   news-digest      — Linux only  (cron)
+#   pr-auto-approve  — macOS only  (launchd)
+#   slack-summary    — macOS only  (launchd)
+#   teams-summary    — macOS only  (launchd)
 #
 # Services: news-digest (NEWS_DIGEST), slack-summary (SLACK_SUMMARY),
-#           pr-auto-approve (PR_AUTO_APPROVE)
+#           pr-auto-approve (PR_AUTO_APPROVE), teams-summary (TEAMS_SUMMARY)
 
 user: rt
 inventory: inventory.yml
@@ -39,10 +46,46 @@ tasks:
           echo "Deploy version: $version"
         options: {local: true}
 
-  # ── Validate Dependencies ──────────────────────────────────
-  - name: validate-deps
+  # ── Platform Checks ────────────────────────────────────────
+  - name: platform-checks
     on_error: &on_error |
       /bin/bash -c 'source ~/.bash.d/telegram.bash 2>/dev/null || source ~/.zsh.d/telegram.zsh 2>/dev/null; tg "⛔ *{SPOT_REMOTE_NAME}* — _scheduled-services_ failed at {SPOT_TASK}"' || true
+    commands:
+      - name: check-platform-requirements
+        script: |
+          os=$(uname -s)
+          errors=()
+
+          # Linux-only services
+          for svc_prefix in "news-digest:NEWS_DIGEST"; do
+            svc="${svc_prefix%%:*}"
+            prefix="${svc_prefix##*:}"
+            enabled_var="${prefix}_ENABLED"
+            if [[ "${!enabled_var:-false}" == "true" && "$os" != "Linux" ]]; then
+              errors+=("$svc is Linux-only but target is $os")
+            fi
+          done
+
+          # macOS-only services
+          for svc_prefix in "pr-auto-approve:PR_AUTO_APPROVE" "slack-summary:SLACK_SUMMARY" "teams-summary:TEAMS_SUMMARY"; do
+            svc="${svc_prefix%%:*}"
+            prefix="${svc_prefix##*:}"
+            enabled_var="${prefix}_ENABLED"
+            if [[ "${!enabled_var:-false}" == "true" && "$os" != "Darwin" ]]; then
+              errors+=("$svc is macOS-only but target is $os")
+            fi
+          done
+
+          if [[ ${#errors[@]} -gt 0 ]]; then
+            echo "ERROR: platform requirement violations:" >&2
+            printf '  - %s\n' "${errors[@]}" >&2
+            exit 1
+          fi
+          echo "Platform checks passed ($os)"
+
+  # ── Validate Dependencies ──────────────────────────────────
+  - name: validate-deps
+    on_error: *on_error
     commands:
       - name: copy-bindeps
         copy:
@@ -164,9 +207,14 @@ tasks:
           [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && write_config "news-digest" "NEWS_DIGEST"
           [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && write_config "slack-summary" "SLACK_SUMMARY"
           [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && write_config "pr-auto-approve" "PR_AUTO_APPROVE"
+          [[ "${TEAMS_SUMMARY_ENABLED:-false}" == "true" ]] && write_config "teams-summary" "TEAMS_SUMMARY"
           echo "Config generation complete"
 
-  # ── Configure Crontab ─────────────────────────────────────
+  # ── Configure Scheduling ──────────────────────────────────
+  #
+  # Linux services (news-digest): crontab entries
+  # macOS services (pr-auto-approve, slack-summary, teams-summary): launchd plists
+  #
   - name: configure-crontab
     on_error: *on_error
     commands:
@@ -175,7 +223,7 @@ tasks:
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           current=$(crontab -l 2>/dev/null || true)
 
-          # Remove all managed:scheduled-* tagged blocks
+          # Remove all managed:scheduled-* tagged blocks (including old macOS service entries)
           cleaned=$(printf '%s\n' "$current" | awk '
             /^# BEGIN managed:scheduled-/ { skip=1; next }
             /^# END managed:scheduled-/   { skip=0; next }
@@ -195,7 +243,7 @@ tasks:
             fi
 
             new_entries+="# BEGIN managed:scheduled-${svc}"$'\n'
-            new_entries+="PATH=\$HOME/.local/bin:\$HOME/.bin:/opt/homebrew/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin"$'\n'
+            new_entries+="PATH=${HOME}/.local/bin:${HOME}/.bin:/opt/homebrew/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin"$'\n'
             while IFS= read -r line || [[ -n "$line" ]]; do
               [[ -z "$line" ]] && continue
               new_entries+="${line}"$'\n'
@@ -204,9 +252,8 @@ tasks:
             echo "$svc: cron schedule added"
           }
 
+          # Only Linux services use cron
           add_schedule "news-digest" "NEWS_DIGEST"
-          add_schedule "slack-summary" "SLACK_SUMMARY"
-          add_schedule "pr-auto-approve" "PR_AUTO_APPROVE"
 
           # Combine: cleaned existing + new managed entries
           final="$cleaned"
@@ -215,45 +262,235 @@ tasks:
             final="${final}${new_entries}"
           fi
 
-          # Trim trailing blank lines (compatible with both GNU and BSD sed)
+          # Trim trailing blank lines
           while [[ "$final" == *$'\n' ]]; do
             final="${final%$'\n'}"
           done
 
-          # Validate cron syntax (try crontab -n, then -T, then regex fallback)
-          cron_validated=false
-          for flag in -n -T; do
-            validation_output=$(printf '%s\n' "$final" | crontab "$flag" - 2>&1) && rc=0 || rc=$?
-            if [[ $rc -eq 0 ]]; then
-              echo "Crontab validated (crontab $flag)"
-              cron_validated=true
-              break
-            fi
-            # If the flag itself is unsupported, try next
-            if echo "$validation_output" | grep -qi "invalid option\|unknown option\|unrecognized option\|illegal option"; then
-              continue
-            fi
-            # Flag is supported but syntax failed
-            echo "ERROR: crontab syntax validation failed: $validation_output" >&2
-            exit 1
-          done
-          if ! $cron_validated; then
-            # Neither -n nor -T available — regex fallback
-            while IFS= read -r line; do
-              [[ "$line" == \#* || -z "$line" ]] && continue
-              before_space="${line%% *}"
-              [[ "$before_space" == *=* ]] && continue
-              if ! echo "$line" | grep -qE '^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+'; then
-                echo "ERROR: invalid cron syntax: $line" >&2
-                exit 1
+          if [[ -z "$final" ]]; then
+            crontab -r 2>/dev/null || true
+            echo "Crontab cleared (no cron services enabled)"
+          else
+            # Validate cron syntax (try crontab -n, then -T, then regex fallback)
+            cron_validated=false
+            for flag in -n -T; do
+              validation_output=$(printf '%s\n' "$final" | crontab "$flag" - 2>&1) && rc=0 || rc=$?
+              if [[ $rc -eq 0 ]]; then
+                echo "Crontab validated (crontab $flag)"
+                cron_validated=true
+                break
               fi
-            done <<< "$final"
-            echo "Crontab validated (regex)"
+              if echo "$validation_output" | grep -qi "invalid option\|unknown option\|unrecognized option\|illegal option"; then
+                continue
+              fi
+              echo "ERROR: crontab syntax validation failed: $validation_output" >&2
+              exit 1
+            done
+            if ! $cron_validated; then
+              while IFS= read -r line; do
+                [[ "$line" == \#* || -z "$line" ]] && continue
+                before_space="${line%% *}"
+                [[ "$before_space" == *=* ]] && continue
+                if ! echo "$line" | grep -qE '^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+'; then
+                  echo "ERROR: invalid cron syntax: $line" >&2
+                  exit 1
+                fi
+              done <<< "$final"
+              echo "Crontab validated (regex)"
+            fi
+
+            printf '%s\n' "$final" | crontab -
+            echo "Crontab updated"
           fi
 
-          # Install new crontab
-          printf '%s\n' "$final" | crontab -
-          echo "Crontab updated"
+  - name: configure-launchd
+    on_error: *on_error
+    commands:
+      - name: copy-plist-template
+        copy: {src: "templates/launchd.plist.tpl", dst: "/tmp/.sched-svc-launchd.plist.tpl"}
+        on_exit: "rm -f /tmp/.sched-svc-launchd.plist.tpl"
+
+      - name: install-launchd-agents
+        script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
+          AGENTS_DIR="$HOME/Library/LaunchAgents"
+          TEMPLATE="/tmp/.sched-svc-launchd.plist.tpl"
+          PREFIX_TAG="com.scheduled-services"
+
+          mkdir -p "$AGENTS_DIR"
+
+          # ── Convert schedule entries to StartCalendarInterval XML ──
+          # Uses yq to extract JSON, then Python to expand array fields
+          # (e.g. Weekday: [1,2,3,4,5]) into cartesian-product entries.
+          schedule_to_xml() {
+            local yaml_file="$1" job_index="$2"
+
+            yq -o=json ".[$job_index].schedule" "$yaml_file" | python3 -c '
+import json, sys
+entries = json.load(sys.stdin)
+KEYS = ["Minute", "Hour", "Weekday", "Day", "Month"]
+xml = ["    <array>"]
+for e in entries:
+    results = [{}]
+    for k in KEYS:
+        if k not in e:
+            continue
+        v = e[k]
+        if isinstance(v, list):
+            results = [{**r, k: item} for r in results for item in v]
+        else:
+            for r in results:
+                r[k] = v
+    for r in results:
+        xml.append("        <dict>")
+        for k in KEYS:
+            if k in r:
+                xml.append(f"            <key>{k}</key>")
+                xml.append(f"            <integer>{r[k]}</integer>")
+        xml.append("        </dict>")
+xml.append("    </array>")
+print("\n".join(xml))
+'
+          }
+
+          # ── Build and install one plist from template ──
+          build_plist() {
+            local label="$1" command="$2" schedule_xml="$3" log_dir="$4"
+            local plist_path="${AGENTS_DIR}/${label}.plist"
+
+            mkdir -p "$log_dir"
+
+            # Wrap command with PATH export
+            local full_command="export PATH=\"${HOME}/.local/bin:${HOME}/.bin:/opt/homebrew/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin:\$PATH\"; ${command}"
+
+            # Build plist from template
+            cp "$TEMPLATE" "$plist_path"
+            sed -i '' "s|{{LABEL}}|${label}|g" "$plist_path"
+            sed -i '' "s|{{WORKING_DIR}}|${HOME}/.scheduled-services|g" "$plist_path"
+            sed -i '' "s|{{LOG_DIR}}|${log_dir}|g" "$plist_path"
+
+            # Replace placeholders using perl (handles multi-line and special chars)
+            local tmp_cmd tmp_sched
+            tmp_cmd=$(mktemp /tmp/.sched-svc-cmd-XXXXXX)
+            tmp_sched=$(mktemp /tmp/.sched-svc-sched-XXXXXX)
+            printf '%s' "$full_command" > "$tmp_cmd"
+            printf '%s' "$schedule_xml" > "$tmp_sched"
+            perl -i -0777 -pe "
+              BEGIN {
+                open F, '<', '$tmp_cmd';   \$cmd   = do { local \$/; <F> }; close F;
+                open G, '<', '$tmp_sched'; \$sched = do { local \$/; <G> }; close G;
+                # XML-escape the command string
+                \$cmd =~ s/&/&amp;/g;
+                \$cmd =~ s/</&lt;/g;
+                \$cmd =~ s/>/&gt;/g;
+              }
+              s/\\{\\{COMMAND\\}\\}/\$cmd/g;
+              s/^[ \\t]*\\{\\{SCHEDULE\\}\\}[ \\t]*\$/\$sched/m;
+            " "$plist_path"
+            rm -f "$tmp_cmd" "$tmp_sched"
+
+            # Validate plist
+            if ! plutil -lint "$plist_path" >/dev/null 2>&1; then
+              echo "ERROR: generated plist $label is invalid:" >&2
+              plutil -lint "$plist_path" >&2
+              rm -f "$plist_path"
+              exit 1
+            fi
+
+            # Load agent
+            launchctl bootstrap "gui/$(id -u)" "$plist_path" 2>/dev/null || {
+              launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null || true
+              launchctl bootstrap "gui/$(id -u)" "$plist_path"
+            }
+          }
+
+          # ── Install or remove launchd agents for one service ──
+          # LAUNCHD_SCHEDULE is a YAML list of jobs, each with command + schedule.
+          # Each job becomes its own LaunchAgent plist.
+          install_service() {
+            local svc="$1" prefix="$2"
+            local enabled_var="${prefix}_ENABLED"
+            local schedule_var="${prefix}_LAUNCHD_SCHEDULE"
+
+            # Remove all existing agents for this service
+            for existing in "${AGENTS_DIR}/${PREFIX_TAG}.${svc}"*.plist; do
+              [[ -f "$existing" ]] || continue
+              local existing_label
+              existing_label=$(basename "$existing" .plist)
+              launchctl bootout "gui/$(id -u)/${existing_label}" 2>/dev/null || true
+              rm -f "$existing"
+            done
+
+            if [[ "${!enabled_var:-false}" != "true" ]]; then
+              return 0
+            fi
+
+            local schedule_content
+            schedule_content=$(printf '%b' "${!schedule_var:-}")
+            if [[ -z "$schedule_content" ]]; then
+              echo "$svc: no LAUNCHD_SCHEDULE — skipping"
+              return 0
+            fi
+
+            # Write YAML to temp file for yq processing
+            local tmp_yaml
+            tmp_yaml=$(mktemp /tmp/.sched-svc-schedule-XXXXXX.yaml)
+            printf '%s\n' "$schedule_content" > "$tmp_yaml"
+
+            if ! yq '.' "$tmp_yaml" >/dev/null 2>&1; then
+              echo "ERROR: $svc LAUNCHD_SCHEDULE is not valid YAML" >&2
+              rm -f "$tmp_yaml"
+              exit 1
+            fi
+
+            local job_count
+            job_count=$(yq 'length' "$tmp_yaml")
+            if [[ "$job_count" -eq 0 ]]; then
+              echo "ERROR: $svc LAUNCHD_SCHEDULE has no jobs" >&2
+              rm -f "$tmp_yaml"
+              exit 1
+            fi
+
+            local log_dir="$HOME/.logs/scheduled-services/${svc}"
+
+            for ((i=0; i<job_count; i++)); do
+              local command
+              command=$(yq -r ".[$i].command" "$tmp_yaml")
+              if [[ -z "$command" || "$command" == "null" ]]; then
+                echo "ERROR: $svc job $i missing 'command' field" >&2
+                rm -f "$tmp_yaml"
+                exit 1
+              fi
+
+              local sched_count
+              sched_count=$(yq ".[$i].schedule | length" "$tmp_yaml")
+              if [[ "$sched_count" -eq 0 ]]; then
+                echo "ERROR: $svc job $i has no schedule entries" >&2
+                rm -f "$tmp_yaml"
+                exit 1
+              fi
+
+              local schedule_xml
+              schedule_xml=$(schedule_to_xml "$tmp_yaml" "$i")
+
+              # Label: no suffix for single-job services, numbered for multi-job
+              local label="${PREFIX_TAG}.${svc}"
+              if [[ "$job_count" -gt 1 ]]; then
+                label="${label}.$((i+1))"
+              fi
+
+              build_plist "$label" "$command" "$schedule_xml" "$log_dir"
+              echo "$svc: agent $label installed ($sched_count schedule entries)"
+            done
+
+            rm -f "$tmp_yaml"
+          }
+
+          install_service "slack-summary" "SLACK_SUMMARY"
+          install_service "pr-auto-approve" "PR_AUTO_APPROVE"
+          install_service "teams-summary" "TEAMS_SUMMARY"
+
+          echo "LaunchAgent configuration complete"
 
   # ── Completion Notification ────────────────────────────────
   - name: notify-completion
@@ -274,6 +511,7 @@ tasks:
             [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && enabled="${enabled}news-digest "
             [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && enabled="${enabled}slack-summary "
             [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && enabled="${enabled}pr-auto-approve "
+            [[ "${TEAMS_SUMMARY_ENABLED:-false}" == "true" ]] && enabled="${enabled}teams-summary "
             enabled="${enabled% }"
 
             tg "✅ *${name}* — _scheduled-services_ deployed (${ver}): ${enabled:-none}" || true
