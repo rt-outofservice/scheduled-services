@@ -75,9 +75,9 @@ When multiple files for the same channel have overlapping time windows, all are 
 **Files:**
 - Modify: `services/teams-summary/teams_summary.py`
 
-- [ ] Implement `read_and_summarize_channel(channel_name, file_infos, config, logger)` that reads all JSON files for a channel, concatenates their content with file metadata headers, builds an AI prompt matching slack-summary style (narrative paragraphs, @mentions, bold channel headers, max 3500 chars, Telegram Markdown V1), calls `call_ai()` with configured provider/model (default haiku)
-- [ ] Implement `run_summary(config, args, logger)` orchestrating the full summary flow: discover files, group by channel, summarize each channel, assemble telegram message with header `\[hostname] *Teams Summary* (date)`, send via `send_telegram()`. Handle: no files found (log + skip), all channels empty after AI (send "no activity" message), partial failures per channel (collect warnings)
-- [ ] Write tests: AI prompt construction (verify prompt includes instructions for deduplication, narrative format, character limit), telegram message assembly (with/without hostname, with warnings), error handling (AI failure, no files found, empty results)
+- [x] Implement `read_and_summarize_channel(channel_name, file_infos, config, logger)` that reads all JSON files for a channel, concatenates their content with file metadata headers, builds an AI prompt matching slack-summary style (narrative paragraphs, @mentions, bold channel headers, max 3500 chars, Telegram Markdown V1), calls `call_ai()` with configured provider/model (default haiku)
+- [x] Implement `run_summary(config, args, logger)` orchestrating the full summary flow: discover files, group by channel, summarize each channel, assemble telegram message with header `\[hostname] *Teams Summary* (date)`, send via `send_telegram()`. Handle: no files found (log + skip), all channels empty after AI (send "no activity" message), partial failures per channel (collect warnings)
+- [x] Write tests: AI prompt construction (verify prompt includes instructions for deduplication, narrative format, character limit), telegram message assembly (with/without hostname, with warnings), error handling (AI failure, no files found, empty results)
 
 ### Task 4: Notify-on-match mode
 

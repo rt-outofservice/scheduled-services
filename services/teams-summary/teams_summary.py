@@ -32,6 +32,7 @@ import yaml
 
 # Add common helpers to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common" / "helpers"))
+from ai import AIError, call_ai  # noqa: E402
 from log import setup_logging  # noqa: E402
 from telegram import send_telegram  # noqa: E402
 
@@ -143,6 +144,138 @@ def group_by_channel(
     return dict(grouped)
 
 
+def read_and_summarize_channel(
+    channel_name: str,
+    file_infos: list[FileInfo],
+    config: dict,
+    logger: logging.Logger,
+) -> str | None:
+    """Read all JSON files for a channel, summarize via AI.
+
+    Concatenates file contents with metadata headers, builds an AI prompt
+    matching slack-summary output style, and calls call_ai().
+
+    Returns the summary text, or None if AI call fails.
+    """
+    parts = []
+    for info in file_infos:
+        try:
+            content = info.path.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.warning(f"Failed to read {info.path}: {e}")
+            continue
+        header = (
+            f"--- {info.path.name} "
+            f"(covers {info.start_time.strftime('%Y-%m-%d %H:%M')} to "
+            f"{info.end_time.strftime('%Y-%m-%d %H:%M')} ET) ---"
+        )
+        parts.append(f"{header}\n{content}")
+
+    if not parts:
+        return None
+
+    combined = "\n\n".join(parts)
+
+    prompt = (
+        "You are a Teams chat summary assistant. Generate a concise narrative summary "
+        f"of these Microsoft Teams messages from the channel/chat: {channel_name}.\n\n"
+        "Rules:\n"
+        "- Write 2-5 sentence narrative paragraphs (NOT bullet lists)\n"
+        "- Attribute statements to people using @DisplayName\n"
+        "- Focus on: technical/operational topics, decisions, incidents, deployments, action items\n"
+        "- Skip: casual chat, jokes, emoji-only reactions, scheduling\n"
+        "- Messages may overlap between dumps; do not repeat information\n"
+        "- If there are no substantive messages, respond with exactly: no activity\n"
+        "- Do NOT include a title or header — it will be added separately\n"
+        "- Max 3500 characters total\n"
+        "- Use Telegram Markdown V1 formatting (bold with *, no other markdown)\n\n"
+        f"Messages:\n{combined}"
+    )
+
+    provider = config.get("llm_provider", "claude")
+    model = config.get("llm_model", "")
+    effort = config.get("llm_model_effort", "")
+
+    try:
+        return call_ai(prompt, provider=provider, model=model, effort=effort)
+    except AIError as e:
+        logger.error(f"AI summarization failed for {channel_name}: {e}")
+        return None
+
+
+def run_summary(config: dict, args, logger: logging.Logger) -> None:
+    """Orchestrate the full summary flow.
+
+    Discovers files, groups by channel, summarizes each, assembles and sends
+    the telegram message.
+    """
+    hostname = config.get("hostname", "")
+    timeframe = args.timeframe if args.timeframe else config["timeframe"]
+
+    try:
+        window_start, window_end = parse_timeframe(timeframe)
+    except ValueError as e:
+        logger.error(f"Timeframe error: {e}")
+        send_telegram(f"teams-summary FATAL: {e}", hostname=hostname)
+        return
+
+    min_file_size = config.get("min_file_size", 500)
+    files = discover_files(config["data_dir"], window_start, window_end, min_file_size, logger)
+
+    if not files:
+        logger.info("No matching files found")
+        date_str = window_end.strftime("%B %-d, %Y")
+        header = f"\\[{hostname}] *Teams Summary* ({date_str})" if hostname else f"*Teams Summary* ({date_str})"
+        send_telegram(f"{header}\n\nNo activity in the configured timeframe.")
+        return
+
+    channels_filter = config.get("channels")
+    grouped = group_by_channel(files, channels_filter)
+
+    if not grouped:
+        logger.info("No channels matched after filtering")
+        date_str = window_end.strftime("%B %-d, %Y")
+        header = f"\\[{hostname}] *Teams Summary* ({date_str})" if hostname else f"*Teams Summary* ({date_str})"
+        send_telegram(f"{header}\n\nNo activity in the configured timeframe.")
+        return
+
+    summaries = []
+    warnings = []
+    for channel_name, channel_files in sorted(grouped.items()):
+        logger.info(f"Summarizing channel: {channel_name} ({len(channel_files)} file(s))")
+        summary = read_and_summarize_channel(channel_name, channel_files, config, logger)
+        if summary is None:
+            warnings.append(f"AI failed for {channel_name}")
+            continue
+        stripped = summary.strip()
+        if stripped.lower() == "no activity":
+            logger.info(f"No activity in {channel_name}")
+            continue
+        summaries.append(f"*{channel_name}*\n{stripped}")
+
+    date_str = window_end.strftime("%B %-d, %Y")
+    header = f"\\[{hostname}] *Teams Summary* ({date_str})" if hostname else f"*Teams Summary* ({date_str})"
+
+    body = "No activity in the configured timeframe." if not summaries else "\n\n".join(summaries)
+
+    warning_text = ""
+    if warnings:
+        warning_text = "\n\nNote: " + "; ".join(warnings)
+
+    full_message = header + "\n\n" + body + warning_text
+
+    try:
+        sent_ok = send_telegram(full_message)
+    except Exception as e:
+        logger.error(f"Telegram send failed: {e}")
+        sent_ok = False
+
+    if sent_ok:
+        logger.info("Teams summary sent successfully")
+    else:
+        logger.warning("Teams summary telegram delivery failed")
+
+
 def load_config(config_path: Path) -> dict:
     """Load and validate config.yaml."""
     if not config_path.exists():
@@ -220,7 +353,7 @@ def main() -> None:
         # run_notify_on_match(config, args, logger) — implemented in Task 4
     else:
         logger.info("Summary mode")
-        # run_summary(config, args, logger) — implemented in Task 3
+        run_summary(config, args, logger)
 
 
 if __name__ == "__main__":
@@ -228,6 +361,7 @@ if __name__ == "__main__":
         import os
         import tempfile
         import unittest
+        from unittest.mock import patch
 
         class TestLoadConfig(unittest.TestCase):
             def test_valid_config(self):
@@ -575,6 +709,185 @@ if __name__ == "__main__":
             def test_empty_input(self):
                 grouped = group_by_channel([], None)
                 self.assertEqual(len(grouped), 0)
+
+        class TestReadAndSummarizeChannel(unittest.TestCase):
+            def setUp(self):
+                self.tmpdir = tempfile.mkdtemp()
+                self.logger = logging.getLogger("test_summarize")
+                self.config = {
+                    "data_dir": self.tmpdir,
+                    "timeframe": "14h",
+                    "llm_provider": "claude",
+                    "llm_model": "haiku",
+                }
+
+            def tearDown(self):
+                import shutil
+
+                shutil.rmtree(self.tmpdir)
+
+            def _make_file_info(self, filename, content):
+                fpath = Path(self.tmpdir) / filename
+                fpath.write_text(content, encoding="utf-8")
+                return FileInfo(
+                    chat_name="General",
+                    start_time=datetime(2026, 4, 2, 13, 0, tzinfo=ET),
+                    end_time=datetime(2026, 4, 2, 14, 0, tzinfo=ET),
+                    path=fpath,
+                )
+
+            @patch("__main__.call_ai", return_value="Summary text here")
+            def test_builds_prompt_with_dedup_instruction(self, mock_ai):
+                info = self._make_file_info("test.json", '{"messages": []}')
+                result = read_and_summarize_channel("General", [info], self.config, self.logger)
+                self.assertEqual(result, "Summary text here")
+                prompt = mock_ai.call_args[0][0]
+                self.assertIn("do not repeat information", prompt)
+                self.assertIn("General", prompt)
+                self.assertIn("narrative", prompt)
+                self.assertIn("3500", prompt)
+                self.assertIn("Telegram Markdown V1", prompt)
+
+            @patch("__main__.call_ai", return_value="Summary text")
+            def test_passes_provider_model_effort(self, mock_ai):
+                info = self._make_file_info("test.json", '{"messages": []}')
+                config = {**self.config, "llm_provider": "codex", "llm_model": "gpt-5.4", "llm_model_effort": "xhigh"}
+                read_and_summarize_channel("General", [info], config, self.logger)
+                _, kwargs = mock_ai.call_args
+                self.assertEqual(kwargs["provider"], "codex")
+                self.assertEqual(kwargs["model"], "gpt-5.4")
+                self.assertEqual(kwargs["effort"], "xhigh")
+
+            @patch("__main__.call_ai", side_effect=AIError("fail"))
+            def test_ai_failure_returns_none(self, mock_ai):
+                info = self._make_file_info("test.json", '{"messages": []}')
+                result = read_and_summarize_channel("General", [info], self.config, self.logger)
+                self.assertIsNone(result)
+
+            @patch("__main__.call_ai", return_value="Summary")
+            def test_multiple_files_concatenated(self, mock_ai):
+                info1 = self._make_file_info("file1.json", '{"msg": "first"}')
+                info2 = FileInfo(
+                    chat_name="General",
+                    start_time=datetime(2026, 4, 2, 14, 0, tzinfo=ET),
+                    end_time=datetime(2026, 4, 2, 15, 0, tzinfo=ET),
+                    path=Path(self.tmpdir) / "file2.json",
+                )
+                (Path(self.tmpdir) / "file2.json").write_text('{"msg": "second"}', encoding="utf-8")
+                read_and_summarize_channel("General", [info1, info2], self.config, self.logger)
+                prompt = mock_ai.call_args[0][0]
+                self.assertIn("first", prompt)
+                self.assertIn("second", prompt)
+
+            def test_unreadable_files_skipped(self):
+                info = FileInfo(
+                    chat_name="General",
+                    start_time=datetime(2026, 4, 2, 13, 0, tzinfo=ET),
+                    end_time=datetime(2026, 4, 2, 14, 0, tzinfo=ET),
+                    path=Path("/nonexistent/file.json"),
+                )
+                result = read_and_summarize_channel("General", [info], self.config, self.logger)
+                self.assertIsNone(result)
+
+            @patch("__main__.call_ai", return_value="Summary")
+            def test_prompt_includes_file_time_range(self, mock_ai):
+                info = self._make_file_info("test.json", '{"messages": []}')
+                read_and_summarize_channel("General", [info], self.config, self.logger)
+                prompt = mock_ai.call_args[0][0]
+                self.assertIn("2026-04-02 13:00", prompt)
+                self.assertIn("2026-04-02 14:00", prompt)
+
+        class TestRunSummary(unittest.TestCase):
+            def setUp(self):
+                self.tmpdir = tempfile.mkdtemp()
+                self.logger = logging.getLogger("test_run_summary")
+                self.config = {
+                    "data_dir": self.tmpdir,
+                    "timeframe": "14h",
+                    "hostname": "testhost",
+                    "min_file_size": 10,
+                }
+
+            def tearDown(self):
+                import shutil
+
+                shutil.rmtree(self.tmpdir)
+
+            def _make_args(self, timeframe=None, notify_on_match=None):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(timeframe=timeframe, notify_on_match=notify_on_match)
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_no_files_sends_no_activity(self, mock_tg):
+                run_summary(self.config, self._make_args(), self.logger)
+                mock_tg.assert_called_once()
+                msg = mock_tg.call_args[0][0]
+                self.assertIn("No activity", msg)
+                self.assertIn("Teams Summary", msg)
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_header_with_hostname(self, mock_tg):
+                run_summary(self.config, self._make_args(), self.logger)
+                msg = mock_tg.call_args[0][0]
+                self.assertIn("\\[testhost]", msg)
+                self.assertIn("*Teams Summary*", msg)
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_header_without_hostname(self, mock_tg):
+                config = {**self.config, "hostname": ""}
+                run_summary(config, self._make_args(), self.logger)
+                msg = mock_tg.call_args[0][0]
+                self.assertNotIn("\\[", msg)
+                self.assertIn("*Teams Summary*", msg)
+
+            @patch("__main__.send_telegram", return_value=True)
+            @patch("__main__.call_ai", return_value="Channel discussion summary")
+            def test_full_flow_with_files(self, mock_ai, mock_tg):
+                # Create a matching file
+                folder = Path(self.tmpdir) / datetime.now(ET).strftime("%Y-%m-%d")
+                folder.mkdir()
+                now = datetime.now(ET)
+                fname = f"General_60mins_{now.strftime('%Y-%m-%d-%H%M')}.json"
+                (folder / fname).write_text('{"messages": [{"text": "hello"}]}' * 20)
+                run_summary(self.config, self._make_args(), self.logger)
+                mock_ai.assert_called_once()
+                mock_tg.assert_called_once()
+                msg = mock_tg.call_args[0][0]
+                self.assertIn("*General*", msg)
+                self.assertIn("Channel discussion summary", msg)
+
+            @patch("__main__.send_telegram", return_value=True)
+            @patch("__main__.call_ai", side_effect=AIError("fail"))
+            def test_ai_failure_adds_warning(self, mock_ai, mock_tg):
+                folder = Path(self.tmpdir) / datetime.now(ET).strftime("%Y-%m-%d")
+                folder.mkdir()
+                now = datetime.now(ET)
+                fname = f"General_60mins_{now.strftime('%Y-%m-%d-%H%M')}.json"
+                (folder / fname).write_text('{"messages": [{"text": "hello"}]}' * 20)
+                run_summary(self.config, self._make_args(), self.logger)
+                mock_tg.assert_called_once()
+                msg = mock_tg.call_args[0][0]
+                self.assertIn("AI failed for General", msg)
+
+            @patch("__main__.send_telegram", return_value=True)
+            @patch("__main__.call_ai", return_value="no activity")
+            def test_no_activity_channels_excluded(self, mock_ai, mock_tg):
+                folder = Path(self.tmpdir) / datetime.now(ET).strftime("%Y-%m-%d")
+                folder.mkdir()
+                now = datetime.now(ET)
+                fname = f"General_60mins_{now.strftime('%Y-%m-%d-%H%M')}.json"
+                (folder / fname).write_text('{"messages": [{"text": "hello"}]}' * 20)
+                run_summary(self.config, self._make_args(), self.logger)
+                msg = mock_tg.call_args[0][0]
+                self.assertNotIn("*General*", msg)
+                self.assertIn("No activity", msg)
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_cli_timeframe_override(self, mock_tg):
+                run_summary(self.config, self._make_args(timeframe="1h"), self.logger)
+                # Should succeed without error (uses 1h instead of config's 14h)
+                mock_tg.assert_called_once()
 
         unittest.main(argv=[sys.argv[0]], exit=True)
     else:
