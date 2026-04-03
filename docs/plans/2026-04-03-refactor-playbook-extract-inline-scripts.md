@@ -60,13 +60,13 @@ install_crontab.py [--tests] svc:PREFIX [svc:PREFIX ...]
 ```
 Reads `<PREFIX>_ENABLED` and `<PREFIX>_CRON_SCHEDULE` from environment variables.
 
-- [ ] Implement crontab reading (subprocess `crontab -l`) and managed-block stripping (`# BEGIN/END managed:scheduled-*`)
-- [ ] Implement new managed-block building with PATH header and schedule lines
-- [ ] Implement cron syntax validation (regex-based, matching current playbook logic at lines 289-300)
-- [ ] Implement crontab installation (`crontab -`) and empty-crontab handling (`crontab -r`)
-- [ ] Implement CLI argument parsing and main entry point
-- [ ] Write embedded tests: block stripping, entry building, syntax validation (valid + invalid lines), merge workflow, empty crontab edge case
-- [ ] Run tests: `uv run python scripts/install_crontab.py --tests`
+- [x] Implement crontab reading (subprocess `crontab -l`) and managed-block stripping (`# BEGIN/END managed:scheduled-*`)
+- [x] Implement new managed-block building with PATH header and schedule lines
+- [x] Implement cron syntax validation (regex-based, matching current playbook logic at lines 289-300)
+- [x] Implement crontab installation (`crontab -`) and empty-crontab handling (`crontab -r`)
+- [x] Implement CLI argument parsing and main entry point
+- [x] Write embedded tests: block stripping, entry building, syntax validation (valid + invalid lines), merge workflow, empty crontab edge case
+- [x] Run tests: `uv run python scripts/install_crontab.py --tests`
 
 ### Task 3: Create `scripts/write_configs.py`
 
