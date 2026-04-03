@@ -18,8 +18,13 @@ Deployed via [umputun/spot](https://github.com/umputun/spot) to `~/.scheduled-se
 ```
 common/helpers/          Shared Python modules (logging, telegram, ai)
 services/<name>/         Each service: main script, config.yaml, .bindeps
-scripts/                 Utility scripts (migration, etc.)
+scripts/                 Deployment & utility scripts
+  install_launchd.py     LaunchAgent plist generation and installation (macOS)
+  install_crontab.py     Managed crontab block installation (Linux)
+  write_configs.py       Service config.yaml generation from env vars
+  migrate.sh             Migration from old Claude Code plugins
 docs/plans/              Implementation plans
+templates/               LaunchAgent plist template (macOS scheduling)
 playbook.main.yaml       Spot deployment playbook
 env.example-main.yml     Environment variable template
 env.<host>-main.yml      Per-host configuration (not committed — see below)
@@ -72,7 +77,6 @@ See `env.example-main.yml` for the full schema and examples.
 | [spot](https://github.com/umputun/spot) | Deployment (runs on your local machine, not on targets) |
 | [uv](https://docs.astral.sh/uv/) | Python package manager / runner |
 | `python3 >= 3.11` | Runtime |
-| `yq` | YAML validation during deploy |
 | `rsync` | File sync during deploy |
 
 ### Per-service
@@ -147,7 +151,7 @@ The playbook will:
    - Use `send_telegram()` for notifications
    - Never fail silently: fatal errors are logged AND sent via Telegram
 4. Add the service to `env.example-main.yml` with `SERVICE_CONFIG`, schedule (`CRON_SCHEDULE` for Linux or `LAUNCHD_SCHEDULE` for macOS), and enable flag
-5. Add the service to `playbook.main.yaml`: platform check, config generation, and scheduling section (crontab or launchd)
+5. Register the service in `playbook.main.yaml`: add its `svc:PREFIX` pair to the platform check, config generation, and scheduling task arguments. The deployment scripts (`scripts/write_configs.py`, `scripts/install_crontab.py`, `scripts/install_launchd.py`) handle the rest automatically
 
 ## Running Tests Locally
 
@@ -165,6 +169,9 @@ uv run python services/news-digest/fetch_feeds.py --tests
 uv run python services/news-digest/news_digest.py --tests
 uv run python services/slack-summary/slack_summary.py --tests
 uv run python services/pr-auto-approve/pr_auto_approve.py --tests
+uv run python scripts/install_launchd.py --tests
+uv run python scripts/install_crontab.py --tests
+uv run python scripts/write_configs.py --tests
 
 # Lint and format
 uv run ruff check .

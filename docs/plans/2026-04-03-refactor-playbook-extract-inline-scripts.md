@@ -108,9 +108,9 @@ Replace large inline scripts with calls to new Python scripts. Compress all rema
 - Modify: `README.md`
 - Modify: `CLAUDE.md`
 
-- [ ] Update README.md: remove `yq` from prerequisites table, add deployment scripts to directory structure, update "Adding a New Service" section to mention registering in deployment scripts
-- [ ] Update CLAUDE.md: update directory layout, add deployment scripts info, add test commands for new scripts
-- [ ] Review and update any references to playbook inline logic that no longer applies
+- [x] Update README.md: remove `yq` from prerequisites table, add deployment scripts to directory structure, update "Adding a New Service" section to mention registering in deployment scripts
+- [x] Update CLAUDE.md: update directory layout, add deployment scripts info, add test commands for new scripts
+- [x] Review and update any references to playbook inline logic that no longer applies
 
 ### Task 6: Verify acceptance criteria
 

@@ -8,7 +8,11 @@ Standalone Python scripts replacing Claude Code plugin skills. Business logic is
 common/helpers/       - Shared Python modules (logging, telegram, ai)
 services/<name>/      - Each service: main script, config.yaml, .bindeps
 templates/            - LaunchAgent plist template (macOS scheduling)
-scripts/              - Utility scripts (migration, etc.)
+scripts/              - Deployment & utility scripts
+  install_launchd.py  - LaunchAgent plist generation/installation (macOS)
+  install_crontab.py  - Managed crontab block installation (Linux)
+  write_configs.py    - Service config.yaml generation from env vars
+  migrate.sh          - Migration from old Claude Code plugins
 docs/plans/           - Implementation plans
 playbook.main.yaml    - Spot deployment playbook
 inventory.yml         - Host inventory for spot
@@ -89,9 +93,18 @@ Some services maintain state files in their service directory (preserved across 
 - `services/pr-auto-approve/reviews.md` — append-only log of all reviewed PRs/MRs
 - `services/slack-summary/user-cache.txt` — cached Slack user ID to display name mappings (USERID=DisplayName per line)
 
+## Deployment Scripts
+
+The `scripts/` directory contains Python scripts called by the playbook during deployment. These are deployment utilities (not services) so they do NOT import from `common/helpers/`. Each supports `--tests` for embedded unittest tests.
+
+- `install_launchd.py` — generates and installs LaunchAgent plists from env vars and template
+- `install_crontab.py` — manages crontab blocks with BEGIN/END markers
+- `write_configs.py` — writes service config.yaml files from env vars with YAML validation
+
 ## Commands
 
 - Run tests: `uv run python <script>.py --tests`
+- Run deployment script tests: `uv run python scripts/install_launchd.py --tests`, `scripts/install_crontab.py --tests`, `scripts/write_configs.py --tests`
 - Lint: `uv run ruff check .`
 - Format: `uv run ruff format --check .`
 - Pre-commit: `pre-commit run --all-files`
