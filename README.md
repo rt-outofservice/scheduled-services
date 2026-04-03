@@ -11,6 +11,7 @@ Deployed via [umputun/spot](https://github.com/umputun/spot) to `~/.scheduled-se
 | **news-digest** | Fetches RSS/Atom feeds, deduplicates articles, uses AI to generate per-group digests, sends via Telegram | `claude` |
 | **pr-auto-approve** | Discovers open PRs/MRs across GitHub/GitLab orgs, applies complexity gates, uses AI for safety review, auto-approves infra changes | `claude`, `gh`, `glab` (if GitLab targets) |
 | **slack-summary** | Dumps Slack channels via slackdump, resolves users, uses AI to summarize discussions, sends via Telegram | `claude`, `slackdump` |
+| **teams-summary** | Reads pre-existing MS Teams JSON message dumps, summarizes conversations per channel via AI, sends via Telegram. Supports keyword monitoring mode with contextual alerts | `claude` |
 
 ## Directory Structure
 
@@ -144,6 +145,7 @@ uv run python services/news-digest/fetch_feeds.py --tests
 uv run python services/news-digest/news_digest.py --tests
 uv run python services/slack-summary/slack_summary.py --tests
 uv run python services/pr-auto-approve/pr_auto_approve.py --tests
+uv run python services/teams-summary/teams_summary.py --tests
 
 # Lint and format
 uv run ruff check .

@@ -103,8 +103,9 @@ def discover_files(
         for json_file in entry.iterdir():
             if not json_file.name.endswith(".json"):
                 continue
-            if json_file.stat().st_size < min_file_size:
-                logger.debug(f"Skipping small file: {json_file} ({json_file.stat().st_size} bytes)")
+            file_size = json_file.stat().st_size
+            if file_size < min_file_size:
+                logger.debug(f"Skipping small file: {json_file} ({file_size} bytes)")
                 continue
             info = parse_filename(json_file.name, json_file)
             if info is None:
@@ -142,6 +143,14 @@ def group_by_channel(
         files.sort(key=lambda f: f.start_time)
 
     return dict(grouped)
+
+
+def _build_header(hostname: str, title: str, window_end: datetime) -> str:
+    """Build Telegram message header with optional hostname prefix."""
+    date_str = window_end.strftime("%B %-d, %Y")
+    if hostname:
+        return f"\\[{hostname}] *{title}* ({date_str})"
+    return f"*{title}* ({date_str})"
 
 
 def read_and_summarize_channel(
@@ -224,8 +233,7 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
 
     if not files:
         logger.info("No matching files found")
-        date_str = window_end.strftime("%B %-d, %Y")
-        header = f"\\[{hostname}] *Teams Summary* ({date_str})" if hostname else f"*Teams Summary* ({date_str})"
+        header = _build_header(hostname, "Teams Summary", window_end)
         send_telegram(f"{header}\n\nNo activity in the configured timeframe.")
         return
 
@@ -234,8 +242,7 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
 
     if not grouped:
         logger.info("No channels matched after filtering")
-        date_str = window_end.strftime("%B %-d, %Y")
-        header = f"\\[{hostname}] *Teams Summary* ({date_str})" if hostname else f"*Teams Summary* ({date_str})"
+        header = _build_header(hostname, "Teams Summary", window_end)
         send_telegram(f"{header}\n\nNo activity in the configured timeframe.")
         return
 
@@ -253,8 +260,7 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
             continue
         summaries.append(f"*{channel_name}*\n{stripped}")
 
-    date_str = window_end.strftime("%B %-d, %Y")
-    header = f"\\[{hostname}] *Teams Summary* ({date_str})" if hostname else f"*Teams Summary* ({date_str})"
+    header = _build_header(hostname, "Teams Summary", window_end)
 
     body = "No activity in the configured timeframe." if not summaries else "\n\n".join(summaries)
 
@@ -364,6 +370,11 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
         send_telegram(f"teams-summary notify-on-match FATAL: AI call failed: {e}", hostname=hostname)
         return
 
+    if not isinstance(result, dict):
+        logger.error(f"AI returned unexpected JSON type: {type(result).__name__}")
+        send_telegram("teams-summary notify-on-match FATAL: unexpected AI response format", hostname=hostname)
+        return
+
     mentioned = result.get("mentioned", False)
     resolved = result.get("resolved", False)
     context = result.get("context", "No context provided.")
@@ -378,8 +389,7 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
 
     # Mentioned and unresolved — send notification
     logger.info(f"Keywords mentioned and UNRESOLVED: {keywords_str}")
-    date_str = window_end.strftime("%B %-d, %Y")
-    header = f"\\[{hostname}] *Teams Alert* ({date_str})" if hostname else f"*Teams Alert* ({date_str})"
+    header = _build_header(hostname, "Teams Alert", window_end)
     message = f"{header}\n\n{context}"
 
     try:
@@ -452,19 +462,6 @@ def main() -> None:
         logger.error(f"Config error: {e}")
         send_telegram(f"teams-summary FATAL: {e}")
         return
-
-    hostname = config.get("hostname", "")
-
-    # CLI timeframe overrides config
-    timeframe = args.timeframe if args.timeframe else config["timeframe"]
-    try:
-        window_start, window_end = parse_timeframe(timeframe)
-    except ValueError as e:
-        logger.error(f"Timeframe error: {e}")
-        send_telegram(f"teams-summary FATAL: {e}", hostname=hostname)
-        return
-
-    logger.info(f"Timeframe: {timeframe} -> {window_start} to {window_end}")
 
     if args.notify_on_match:
         logger.info(f"Notify-on-match mode: {args.notify_on_match}")
@@ -582,21 +579,40 @@ if __name__ == "__main__":
                 self.assertAlmostEqual(end.timestamp(), now.timestamp(), delta=2)
 
         class TestCLITimeframePrecedence(unittest.TestCase):
-            def test_cli_overrides_config(self):
-                """Verify that --timeframe arg takes precedence over config value."""
-                with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
-                    yaml.dump({"data_dir": "/tmp/teams", "timeframe": "14h"}, f)
-                    f.flush()
-                    config = load_config(Path(f.name))
-                # Simulate CLI override
-                cli_timeframe = "2h"
-                effective = cli_timeframe if cli_timeframe else config["timeframe"]
-                self.assertEqual(effective, "2h")
-                # Simulate no CLI override
-                cli_timeframe = None
-                effective = cli_timeframe if cli_timeframe else config["timeframe"]
-                self.assertEqual(effective, "14h")
-                Path(f.name).unlink()
+            def setUp(self):
+                self.tmpdir = tempfile.mkdtemp()
+                self.logger = logging.getLogger("test_cli_precedence")
+                self.config = {
+                    "data_dir": self.tmpdir,
+                    "timeframe": "14h",
+                    "hostname": "testhost",
+                    "min_file_size": 10,
+                }
+
+            def tearDown(self):
+                import shutil
+
+                shutil.rmtree(self.tmpdir)
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_cli_overrides_config(self, mock_tg):
+                """CLI --timeframe should override config timeframe in run_summary."""
+                from types import SimpleNamespace
+
+                args = SimpleNamespace(timeframe="1h", notify_on_match=None)
+                with patch("__main__.parse_timeframe", wraps=parse_timeframe) as mock_pt:
+                    run_summary(self.config, args, self.logger)
+                    mock_pt.assert_called_once_with("1h")
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_config_used_when_no_cli(self, mock_tg):
+                """Config timeframe should be used when CLI --timeframe is None."""
+                from types import SimpleNamespace
+
+                args = SimpleNamespace(timeframe=None, notify_on_match=None)
+                with patch("__main__.parse_timeframe", wraps=parse_timeframe) as mock_pt:
+                    run_summary(self.config, args, self.logger)
+                    mock_pt.assert_called_once_with("14h")
 
         class TestParseFilename(unittest.TestCase):
             def test_normal_name(self):
@@ -1095,6 +1111,16 @@ if __name__ == "__main__":
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
                 self.assertIn("FATAL", msg)
+
+            @patch("__main__.call_ai_json", return_value=["not", "a", "dict"])
+            @patch("__main__.send_telegram", return_value=True)
+            def test_ai_non_dict_response_sends_error(self, mock_tg, mock_ai):
+                self._create_test_file()
+                run_notify_on_match(self.config, self._make_args(), self.logger)
+                mock_tg.assert_called_once()
+                msg = mock_tg.call_args[0][0]
+                self.assertIn("FATAL", msg)
+                self.assertIn("unexpected AI response format", msg)
 
             @patch("__main__.send_telegram", return_value=True)
             def test_no_files_no_action(self, mock_tg):
