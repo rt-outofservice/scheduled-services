@@ -84,10 +84,10 @@ When multiple files for the same channel have overlapping time windows, all are 
 **Files:**
 - Modify: `services/teams-summary/teams_summary.py`
 
-- [ ] Implement `run_notify_on_match(config, args, logger)` that: discovers and filters files same as summary mode, reads all relevant JSON content, builds an AI prompt asking to check if any of the provided keywords/phrases appear in the conversations. The prompt instructs the AI to return a JSON response with fields: `mentioned` (bool), `resolved` (bool), `context` (string summary of the discussion). Use `call_ai_json()` for structured response
-- [ ] Implement notification logic: if not mentioned -> do nothing (log only), if mentioned but resolved -> do nothing (log only), if mentioned and unresolved -> send telegram notification with context and ask user to step in. Format: `\[hostname] *Teams Alert* (date)\n\n<context from AI about the topic and why input may be helpful>`
-- [ ] Wire the mode selection in `main()`: if `--notify-on-match` is provided, call `run_notify_on_match()` instead of `run_summary()`
-- [ ] Write tests: AI prompt includes all keywords, JSON response parsing for all three outcomes (not mentioned, mentioned+resolved, mentioned+unresolved), telegram notification sent only for unresolved matches, error handling (AI failure, malformed JSON response)
+- [x] Implement `run_notify_on_match(config, args, logger)` that: discovers and filters files same as summary mode, reads all relevant JSON content, builds an AI prompt asking to check if any of the provided keywords/phrases appear in the conversations. The prompt instructs the AI to return a JSON response with fields: `mentioned` (bool), `resolved` (bool), `context` (string summary of the discussion). Use `call_ai_json()` for structured response
+- [x] Implement notification logic: if not mentioned -> do nothing (log only), if mentioned but resolved -> do nothing (log only), if mentioned and unresolved -> send telegram notification with context and ask user to step in. Format: `\[hostname] *Teams Alert* (date)\n\n<context from AI about the topic and why input may be helpful>`
+- [x] Wire the mode selection in `main()`: if `--notify-on-match` is provided, call `run_notify_on_match()` instead of `run_summary()`
+- [x] Write tests: AI prompt includes all keywords, JSON response parsing for all three outcomes (not mentioned, mentioned+resolved, mentioned+unresolved), telegram notification sent only for unresolved matches, error handling (AI failure, malformed JSON response)
 
 ### Task 5: Deployment integration
 

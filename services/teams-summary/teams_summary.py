@@ -32,7 +32,7 @@ import yaml
 
 # Add common helpers to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common" / "helpers"))
-from ai import AIError, call_ai  # noqa: E402
+from ai import AIError, call_ai, call_ai_json  # noqa: E402
 from log import setup_logging  # noqa: E402
 from telegram import send_telegram  # noqa: E402
 
@@ -276,6 +276,124 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
         logger.warning("Teams summary telegram delivery failed")
 
 
+def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
+    """Check conversations for keyword mentions and notify if unresolved.
+
+    Discovers files same as summary mode, reads all relevant JSON content,
+    uses AI to check for keyword mentions. Only sends Telegram if keywords
+    are mentioned and the topic is unresolved.
+    """
+    hostname = config.get("hostname", "")
+    timeframe = args.timeframe if args.timeframe else config["timeframe"]
+    keywords = [k.strip() for k in args.notify_on_match.split(",") if k.strip()]
+
+    if not keywords:
+        logger.warning("No keywords provided for notify-on-match mode")
+        return
+
+    try:
+        window_start, window_end = parse_timeframe(timeframe)
+    except ValueError as e:
+        logger.error(f"Timeframe error: {e}")
+        send_telegram(f"teams-summary FATAL: {e}", hostname=hostname)
+        return
+
+    min_file_size = config.get("min_file_size", 500)
+    files = discover_files(config["data_dir"], window_start, window_end, min_file_size, logger)
+
+    if not files:
+        logger.info("No matching files found for notify-on-match")
+        return
+
+    channels_filter = config.get("channels")
+    grouped = group_by_channel(files, channels_filter)
+
+    if not grouped:
+        logger.info("No channels matched after filtering for notify-on-match")
+        return
+
+    # Read all file contents
+    all_content_parts = []
+    for channel_name, channel_files in sorted(grouped.items()):
+        for info in channel_files:
+            try:
+                content = info.path.read_text(encoding="utf-8")
+            except OSError as e:
+                logger.warning(f"Failed to read {info.path}: {e}")
+                continue
+            header = (
+                f"--- {channel_name}: {info.path.name} "
+                f"(covers {info.start_time.strftime('%Y-%m-%d %H:%M')} to "
+                f"{info.end_time.strftime('%Y-%m-%d %H:%M')} ET) ---"
+            )
+            all_content_parts.append(f"{header}\n{content}")
+
+    if not all_content_parts:
+        logger.info("No readable files for notify-on-match")
+        return
+
+    combined = "\n\n".join(all_content_parts)
+    keywords_str = ", ".join(keywords)
+
+    prompt = (
+        "You are a Teams chat monitoring assistant. Check if any of the following "
+        f"keywords/phrases are discussed in these Microsoft Teams messages: {keywords_str}\n\n"
+        "Respond with a JSON object containing exactly these fields:\n"
+        '- "mentioned": boolean — true if any of the keywords/phrases appear or are '
+        "discussed in the conversations\n"
+        '- "resolved": boolean — true if the topic was discussed AND resolved/concluded '
+        "(someone provided a fix, answer, or confirmation that no action is needed)\n"
+        '- "context": string — brief summary (2-4 sentences) of what was discussed about '
+        "the keywords, including who was involved and what was said. If not mentioned, "
+        'write "Not mentioned in any conversations."\n\n'
+        "Important:\n"
+        "- Look for both exact keyword matches and semantic references to the topics\n"
+        "- Only set resolved=true if there is clear evidence the issue is handled\n"
+        "- Return ONLY the JSON object, no other text\n\n"
+        f"Messages:\n{combined}"
+    )
+
+    provider = config.get("llm_provider", "claude")
+    model = config.get("llm_model", "")
+    effort = config.get("llm_model_effort", "")
+
+    try:
+        result = call_ai_json(prompt, provider=provider, model=model, effort=effort)
+    except AIError as e:
+        logger.error(f"AI notify-on-match failed: {e}")
+        send_telegram(f"teams-summary notify-on-match FATAL: AI call failed: {e}", hostname=hostname)
+        return
+
+    mentioned = result.get("mentioned", False)
+    resolved = result.get("resolved", False)
+    context = result.get("context", "No context provided.")
+
+    if not mentioned:
+        logger.info(f"Keywords not mentioned: {keywords_str}")
+        return
+
+    if resolved:
+        logger.info(f"Keywords mentioned but resolved: {keywords_str}")
+        return
+
+    # Mentioned and unresolved — send notification
+    logger.info(f"Keywords mentioned and UNRESOLVED: {keywords_str}")
+    date_str = window_end.strftime("%B %-d, %Y")
+    header = f"\\[{hostname}] *Teams Alert* ({date_str})" if hostname else f"*Teams Alert* ({date_str})"
+    message = f"{header}\n\n{context}"
+
+    try:
+        sent_ok = send_telegram(message)
+    except Exception as e:
+        logger.error(f"Telegram send failed: {e}")
+        sent_ok = False
+
+    if sent_ok:
+        logger.info("Teams alert sent successfully")
+    else:
+        logger.warning("Teams alert telegram delivery failed")
+
+
 def load_config(config_path: Path) -> dict:
     """Load and validate config.yaml."""
     if not config_path.exists():
@@ -350,7 +468,7 @@ def main() -> None:
 
     if args.notify_on_match:
         logger.info(f"Notify-on-match mode: {args.notify_on_match}")
-        # run_notify_on_match(config, args, logger) — implemented in Task 4
+        run_notify_on_match(config, args, logger)
     else:
         logger.info("Summary mode")
         run_summary(config, args, logger)
@@ -888,6 +1006,119 @@ if __name__ == "__main__":
                 run_summary(self.config, self._make_args(timeframe="1h"), self.logger)
                 # Should succeed without error (uses 1h instead of config's 14h)
                 mock_tg.assert_called_once()
+
+        class TestRunNotifyOnMatch(unittest.TestCase):
+            def setUp(self):
+                self.tmpdir = tempfile.mkdtemp()
+                self.logger = logging.getLogger("test_notify")
+                self.config = {
+                    "data_dir": self.tmpdir,
+                    "timeframe": "14h",
+                    "hostname": "testhost",
+                    "min_file_size": 10,
+                }
+
+            def tearDown(self):
+                import shutil
+
+                shutil.rmtree(self.tmpdir)
+
+            def _make_args(self, notify_on_match="keyword1,keyword2", timeframe=None):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(timeframe=timeframe, notify_on_match=notify_on_match)
+
+            def _create_test_file(self):
+                folder = Path(self.tmpdir) / datetime.now(ET).strftime("%Y-%m-%d")
+                folder.mkdir(exist_ok=True)
+                now = datetime.now(ET)
+                fname = f"General_60mins_{now.strftime('%Y-%m-%d-%H%M')}.json"
+                (folder / fname).write_text('{"messages": [{"text": "discussion about keyword1"}]}' * 10)
+
+            @patch(
+                "__main__.call_ai_json",
+                return_value={"mentioned": False, "resolved": False, "context": "Not mentioned."},
+            )
+            @patch("__main__.send_telegram", return_value=True)
+            def test_not_mentioned_no_telegram(self, mock_tg, mock_ai):
+                self._create_test_file()
+                run_notify_on_match(self.config, self._make_args(), self.logger)
+                mock_ai.assert_called_once()
+                mock_tg.assert_not_called()
+
+            @patch(
+                "__main__.call_ai_json",
+                return_value={"mentioned": True, "resolved": True, "context": "Resolved by @Alice."},
+            )
+            @patch("__main__.send_telegram", return_value=True)
+            def test_mentioned_resolved_no_telegram(self, mock_tg, mock_ai):
+                self._create_test_file()
+                run_notify_on_match(self.config, self._make_args(), self.logger)
+                mock_ai.assert_called_once()
+                mock_tg.assert_not_called()
+
+            @patch(
+                "__main__.call_ai_json",
+                return_value={
+                    "mentioned": True,
+                    "resolved": False,
+                    "context": "@Bob raised keyword1 issue, no response yet.",
+                },
+            )
+            @patch("__main__.send_telegram", return_value=True)
+            def test_mentioned_unresolved_sends_telegram(self, mock_tg, mock_ai):
+                self._create_test_file()
+                run_notify_on_match(self.config, self._make_args(), self.logger)
+                mock_ai.assert_called_once()
+                mock_tg.assert_called_once()
+                msg = mock_tg.call_args[0][0]
+                self.assertIn("*Teams Alert*", msg)
+                self.assertIn("\\[testhost]", msg)
+                self.assertIn("@Bob raised keyword1 issue", msg)
+
+            @patch("__main__.call_ai_json")
+            @patch("__main__.send_telegram", return_value=True)
+            def test_prompt_includes_all_keywords(self, mock_tg, mock_ai):
+                mock_ai.return_value = {"mentioned": False, "resolved": False, "context": "Not mentioned."}
+                self._create_test_file()
+                run_notify_on_match(self.config, self._make_args("deploy,outage,rollback"), self.logger)
+                prompt = mock_ai.call_args[0][0]
+                self.assertIn("deploy", prompt)
+                self.assertIn("outage", prompt)
+                self.assertIn("rollback", prompt)
+
+            @patch("__main__.call_ai_json", side_effect=AIError("AI fail"))
+            @patch("__main__.send_telegram", return_value=True)
+            def test_ai_failure_sends_error_telegram(self, mock_tg, mock_ai):
+                self._create_test_file()
+                run_notify_on_match(self.config, self._make_args(), self.logger)
+                mock_tg.assert_called_once()
+                msg = mock_tg.call_args[0][0]
+                self.assertIn("FATAL", msg)
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_no_files_no_action(self, mock_tg):
+                # Empty data dir — no files
+                run_notify_on_match(self.config, self._make_args(), self.logger)
+                mock_tg.assert_not_called()
+
+            @patch("__main__.send_telegram", return_value=True)
+            def test_empty_keywords_no_action(self, mock_tg):
+                run_notify_on_match(self.config, self._make_args(notify_on_match="  , ,  "), self.logger)
+                mock_tg.assert_not_called()
+
+            @patch(
+                "__main__.call_ai_json",
+                return_value={"mentioned": True, "resolved": False, "context": "Issue found."},
+            )
+            @patch("__main__.send_telegram", return_value=True)
+            def test_header_without_hostname(self, mock_tg, mock_ai):
+                self._create_test_file()
+                config = {**self.config, "hostname": ""}
+                run_notify_on_match(config, self._make_args(), self.logger)
+                msg = mock_tg.call_args[0][0]
+                self.assertNotIn("\\[", msg)
+                self.assertIn("*Teams Alert*", msg)
 
         unittest.main(argv=[sys.argv[0]], exit=True)
     else:
