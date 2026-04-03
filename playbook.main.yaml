@@ -82,17 +82,11 @@ tasks:
           for svc in news-digest slack-summary pr-auto-approve; do
             prefix=$(echo "$svc" | tr '[:lower:]-' '[:upper:]_'); ev="${prefix}_ENABLED"
             [[ "${!ev:-false}" != "true" || ! -f "/tmp/.bindeps-${svc}" ]] && continue
-            while IFS= read -r dep || [[ -n "$dep" ]]; do
-              dep=$(echo "$dep" | xargs); [[ -z "$dep" || "$dep" == \#* ]] && continue
-              command -v "$dep" &>/dev/null || missing+=("$dep (required by $svc)")
+            while IFS= read -r dep || [[ -n "$dep" ]]; do dep="${dep## }"; dep="${dep%% }"
+              [[ -n "$dep" && "$dep" != \#* ]] && ! command -v "$dep" &>/dev/null && missing+=("$dep ($svc)")
             done < "/tmp/.bindeps-${svc}"
           done
-          if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "ERROR: missing required tools:" >&2
-            printf '  - %s\n' "${missing[@]}" >&2
-            exit 1
-          fi
-          echo "All required tools present"
+          [[ ${#missing[@]} -eq 0 ]] && echo "All required tools present" || { printf 'ERROR: missing %s\n' "${missing[@]}" >&2; exit 1; }
 
   # ── Deploy Files ───────────────────────────────────────────
   - name: deploy-files
@@ -112,14 +106,9 @@ tasks:
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           mkdir -p ~/.scheduled-services
           rsync -a --delete \
-            --exclude '__pycache__' \
-            --exclude '*.pyc' \
-            --exclude 'config.yaml' \
-            --exclude '.version' \
-            --exclude '.lock' \
-            --exclude 'reviews.md' \
-            --exclude 'user-cache.txt' \
-            --exclude '.venv' \
+            --exclude='__pycache__' --exclude='*.pyc' --exclude='config.yaml' \
+            --exclude='.version' --exclude='.lock' --exclude='reviews.md' \
+            --exclude='user-cache.txt' --exclude='.venv' \
             /tmp/.sched-svc-deploy/ ~/.scheduled-services/
 
       - name: deploy-version

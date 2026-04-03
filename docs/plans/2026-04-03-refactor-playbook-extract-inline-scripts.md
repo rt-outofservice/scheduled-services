@@ -114,12 +114,12 @@ Replace large inline scripts with calls to new Python scripts. Compress all rema
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Run all existing service tests (`uv run python services/*/[!_]*.py --tests` and `uv run python common/helpers/*.py --tests`)
-- [ ] Run all new script tests (`uv run python scripts/install_launchd.py --tests`, `scripts/install_crontab.py --tests`, `scripts/write_configs.py --tests`)
-- [ ] Run linter: `uv run ruff check .`
-- [ ] Run formatter: `uv run ruff format --check .`
-- [ ] Verify no inline script block in playbook exceeds 10 lines (excluding comments and the PATH export line)
-- [ ] Verify `yq` is no longer listed in required remote tools
+- [x] Run all existing service tests (`uv run python services/*/[!_]*.py --tests` and `uv run python common/helpers/*.py --tests`)
+- [x] Run all new script tests (`uv run python scripts/install_launchd.py --tests`, `scripts/install_crontab.py --tests`, `scripts/write_configs.py --tests`)
+- [x] Run linter: `uv run ruff check .` (pre-existing issues only, no new violations)
+- [x] Run formatter: `uv run ruff format --check .` (pre-existing issues only, no new violations)
+- [x] Verify no inline script block in playbook exceeds 10 lines (excluding comments and the PATH export line)
+- [x] Verify `yq` is no longer listed in required remote tools
 
 ### Task 7: Update documentation
 
