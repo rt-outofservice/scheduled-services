@@ -65,10 +65,10 @@ When multiple files for the same channel have overlapping time windows, all are 
 **Files:**
 - Modify: `services/teams-summary/teams_summary.py`
 
-- [ ] Implement `parse_filename(filename)` using regex `^(.+?)_(\d+mins)_(\d{4}-\d{2}-\d{2}-\d{4})\.json$` to extract three groups: chat_name, lookback minutes (strip "mins" suffix, convert to int), file datetime (parse `yyyy-mm-dd-HHMM` in America/New_York timezone). Return a named tuple or dataclass with fields: chat_name, start_time, end_time, path. Return None for non-matching filenames (log warning)
-- [ ] Implement `discover_files(data_dir, window_start, window_end, min_file_size)` that: scans only date folders overlapping the time window (with 1-day buffer), filters .json files by size threshold, parses each filename via regex, keeps files whose time range overlaps with the requested window
-- [ ] Implement `group_by_channel(file_infos, channels_filter)` that groups parsed file infos by chat_name, applies optional channel substring filtering (case-insensitive), and sorts files within each group chronologically
-- [ ] Write tests: filename parsing via regex (normal names, names with underscores and special chars, various lookback formats like 30mins/60mins/120mins, non-matching filenames return None), file discovery (mock filesystem with date folders, time window filtering), channel grouping and filtering, edge cases (no matching files, all files filtered out)
+- [x] Implement `parse_filename(filename)` using regex `^(.+?)_(\d+mins)_(\d{4}-\d{2}-\d{2}-\d{4})\.json$` to extract three groups: chat_name, lookback minutes (strip "mins" suffix, convert to int), file datetime (parse `yyyy-mm-dd-HHMM` in America/New_York timezone). Return a named tuple or dataclass with fields: chat_name, start_time, end_time, path. Return None for non-matching filenames (log warning)
+- [x] Implement `discover_files(data_dir, window_start, window_end, min_file_size)` that: scans only date folders overlapping the time window (with 1-day buffer), filters .json files by size threshold, parses each filename via regex, keeps files whose time range overlaps with the requested window
+- [x] Implement `group_by_channel(file_infos, channels_filter)` that groups parsed file infos by chat_name, applies optional channel substring filtering (case-insensitive), and sorts files within each group chronologically
+- [x] Write tests: filename parsing via regex (normal names, names with underscores and special chars, various lookback formats like 30mins/60mins/120mins, non-matching filenames return None), file discovery (mock filesystem with date folders, time window filtering), channel grouping and filtering, edge cases (no matching files, all files filtered out)
 
 ### Task 3: Summary mode (AI + Telegram)
 
