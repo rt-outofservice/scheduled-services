@@ -52,13 +52,13 @@ When multiple files for the same channel have overlapping time windows, all are 
 - Create: `services/teams-summary/teams_summary.py`
 - Create: `services/teams-summary/.bindeps`
 
-- [ ] Create `.bindeps` (empty file, no external tools needed)
-- [ ] Implement standard boilerplate: shebang, docstring, sys.path manipulation, common helper imports
-- [ ] Implement `load_config(config_path)` requiring: `data_dir` (path to JSON dumps root), `timeframe` (e.g. "14h"); optional: `hostname`, `channels` (list), `llm_provider`, `llm_model`, `llm_model_effort`, `min_file_size` (default 500)
-- [ ] Implement `parse_timeframe(timeframe)` reusing same format as slack-summary (Nh, Nm, Nd) but returning an ET-aware datetime pair (window_start, window_end)
-- [ ] Implement `main()` with argparse: `--tests`, `--timeframe <value>` (overrides config), `--notify-on-match <comma-separated>`. Wire up config loading, logging setup, and early exits for errors
-- [ ] Implement `if __name__ == "__main__"` block with --tests gating
-- [ ] Write tests: config loading (valid, missing keys, missing file), timeframe parsing (hours/minutes/days, invalid formats), CLI argument precedence for timeframe
+- [x] Create `.bindeps` (empty file, no external tools needed)
+- [x] Implement standard boilerplate: shebang, docstring, sys.path manipulation, common helper imports
+- [x] Implement `load_config(config_path)` requiring: `data_dir` (path to JSON dumps root), `timeframe` (e.g. "14h"); optional: `hostname`, `channels` (list), `llm_provider`, `llm_model`, `llm_model_effort`, `min_file_size` (default 500)
+- [x] Implement `parse_timeframe(timeframe)` reusing same format as slack-summary (Nh, Nm, Nd) but returning an ET-aware datetime pair (window_start, window_end)
+- [x] Implement `main()` with argparse: `--tests`, `--timeframe <value>` (overrides config), `--notify-on-match <comma-separated>`. Wire up config loading, logging setup, and early exits for errors
+- [x] Implement `if __name__ == "__main__"` block with --tests gating
+- [x] Write tests: config loading (valid, missing keys, missing file), timeframe parsing (hours/minutes/days, invalid formats), CLI argument precedence for timeframe
 
 ### Task 2: File discovery and selection
 
