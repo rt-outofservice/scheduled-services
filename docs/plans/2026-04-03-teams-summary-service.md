@@ -101,10 +101,10 @@ When multiple files for the same channel have overlapping time windows, all are 
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] Run full test suite: `uv run python services/teams-summary/teams_summary.py --tests`
-- [ ] Run linter: `uv run ruff check .`
-- [ ] Run formatter: `uv run ruff format --check .`
-- [ ] Run pre-commit: `pre-commit run --all-files`
+- [x] Run full test suite: `uv run python services/teams-summary/teams_summary.py --tests`
+- [x] Run linter: `uv run ruff check .`
+- [x] Run formatter: `uv run ruff format --check .`
+- [x] Run pre-commit: `pre-commit run --all-files`
 
 ### Task 7: Update documentation
 
