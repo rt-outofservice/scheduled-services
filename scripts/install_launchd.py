@@ -114,8 +114,10 @@ def render_plist(template, label, command, schedule_xml, working_dir, log_dir):
 def remove_existing_agents(svc, prefix_tag, agents_dir):
     """Remove all existing launchd agents for a service."""
     uid = os.getuid()
-    pattern = os.path.join(agents_dir, f"{prefix_tag}.{svc}*.plist")
-    for plist_path in glob.glob(pattern):
+    # Match exact label and numbered suffixes (e.g. .svc.plist, .svc.1.plist)
+    pattern_exact = os.path.join(agents_dir, f"{prefix_tag}.{svc}.plist")
+    pattern_numbered = os.path.join(agents_dir, f"{prefix_tag}.{svc}.*.plist")
+    for plist_path in glob.glob(pattern_exact) + glob.glob(pattern_numbered):
         label = Path(plist_path).stem
         subprocess.run(
             ["launchctl", "bootout", f"gui/{uid}/{label}"],
