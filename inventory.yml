@@ -1,0 +1,7 @@
+groups:
+  homelab:
+    - {host: "saturn.outofservice.io", port: 2222, name: "saturn", user: "rt"}
+  gear:
+    - {host: "polite-wombat.outofservice.io", port: 2222, name: "polite-wombat", user: "rt"}
+    - {host: "angry-lobster.outofservice.io", port: 2222, name: "angry-lobster", user: "romantischenko"}
+    - {host: "speedy-elk.outofservice.io", port: 2222, name: "speedy-elk", user: "roman.tishchenko"}

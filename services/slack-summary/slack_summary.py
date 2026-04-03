@@ -77,7 +77,7 @@ def parse_timeframe(timeframe: str) -> datetime:
 
 def format_timestamp_iso(dt: datetime) -> str:
     """Format datetime as ISO 8601 string for slackdump -time-from."""
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def validate_slackdump_auth(first_channel: str, logger: logging.Logger) -> bool:
@@ -297,19 +297,23 @@ def resolve_users_via_slackdump(
             ["slackdump", "list", "users"],
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=120,
         )
         if result.returncode == 0:
-            # Parse user list output — each line typically: ID  Name  DisplayName  Email...
+            # Parse user list output — space-aligned columns: Name  ID  Bot?  Email  ...
             for line in result.stdout.splitlines():
-                parts = line.strip().split("\t")
-                if len(parts) >= 3 and parts[0].startswith("U"):
-                    uid = parts[0].strip()
-                    display_name = parts[2].strip() or parts[1].strip()
-                    if uid in uncached and display_name:
-                        # Strip markdown special chars from display name
-                        display_name = re.sub(r"[*_`\[]", "", display_name)
-                        cache[uid] = display_name
+                # Find user ID (U followed by alphanumeric) in the line
+                match = re.search(r"\b(U[A-Z0-9]{6,})\b", line)
+                if not match:
+                    continue
+                uid = match.group(1)
+                if uid not in uncached:
+                    continue
+                # Name is everything before the ID, stripped
+                name = line[: match.start()].strip()
+                if name:
+                    name = re.sub(r"[*_`\[]", "", name)
+                    cache[uid] = name
             save_user_cache(cache_path, cache)
             logger.info(f"Resolved {len(uncached) - len(uncached - set(cache.keys()))} users via slackdump list")
         else:
@@ -390,29 +394,36 @@ def build_ai_prompt(
         f"{mentions_section}"
         "\nRules:\n"
         "- Write 2-5 sentence narrative paragraphs per active channel (NOT bullet lists)\n"
-        "- Organize by channel, using channel name as header\n"
+        "- Organize by channel, using #channel-name as bold header with NO blank line before the paragraph\n"
         "- Attribute statements to people using @DisplayName\n"
         "- Focus on: technical/operational topics, decisions, incidents, deployments, action items\n"
         "- Skip: casual chat, jokes, food discussions, emoji-only reactions, scheduling\n"
         "- If a channel has no substantive messages, omit it entirely\n"
-        "- List channels with no activity at the bottom in italic\n"
-        "- Max 3800 characters total\n"
+        "- If any channels had no substantive messages, end with: No activity: #channel1, #channel2 (plain text, not bold)\n"
+        "- Do NOT include a title or header — it will be added separately\n"
+        "- Max 3500 characters total\n"
         "- Use Telegram Markdown V1 formatting (bold with *, no other markdown)\n\n"
         f"Messages:\n{data_json}"
     )
 
 
 def truncate_message(message: str, max_len: int = 4000) -> str:
-    """Truncate message from the bottom if it exceeds max_len."""
+    """Truncate message at last complete block (double newline) within max_len.
+
+    Cuts cleanly without adding any truncation notice.
+    """
     if max_len < 80:
         max_len = 80
     if len(message) <= max_len:
         return message
-    truncated = message[: max_len - 40]
+    truncated = message[:max_len]
+    last_block = truncated.rfind("\n\n")
+    if last_block > max_len // 2:
+        return truncated[:last_block]
     last_nl = truncated.rfind("\n")
     if last_nl > max_len // 2:
-        truncated = truncated[:last_nl]
-    return truncated + "\n\n... (truncated)"
+        return truncated[:last_nl]
+    return truncated
 
 
 def format_warnings(warnings: list[str]) -> str:
@@ -508,23 +519,33 @@ def run_summary(config_path: Path) -> None:
         prompt = build_ai_prompt(channels_data, user_cache, user_id, timeframe)
 
         # Call AI
+        llm_provider = config.get("llm_provider", "claude")
+        llm_model = config.get("llm_model", "")
+        llm_effort = config.get("llm_model_effort", "")
         try:
-            summary_text = call_ai(prompt)
+            summary_text = call_ai(prompt, provider=llm_provider, model=llm_model, effort=llm_effort)
         except AIError as e:
             logger.error(f"AI call failed: {e}")
             send_telegram(f"slack-summary FATAL: AI call failed: {e}", hostname=hostname)
             return
 
-        # Truncate AI text first, then append warnings so warnings survive
-        # Account for hostname prefix added by send_telegram
-        warning_text = format_warnings(warnings)
-        prefix_len = len(f"*{hostname}* — ") if hostname else 0
-        summary_text = truncate_message(summary_text, max_len=4000 - len(warning_text) - prefix_len)
-        summary_text += warning_text
+        # Build title header
+        from datetime import UTC, datetime
 
-        # Send via telegram
+        date_str = datetime.now(UTC).strftime("%B %-d, %Y")
+        header = f"\\[{hostname}] *Slack Summary* ({date_str})" if hostname else f"*Slack Summary* ({date_str})"
+
+        # Truncate AI text to fit within limit, preserving header and warnings
+        warning_text = format_warnings(warnings)
+        fixed_len = len(header) + len("\n\n") + len(warning_text)
+        summary_text = truncate_message(summary_text, max_len=4000 - fixed_len)
+
+        # Assemble final message
+        full_message = header + "\n\n" + summary_text + warning_text
+
+        # Send via telegram (no hostname — it's already in the header)
         try:
-            sent_ok = send_telegram(summary_text, hostname=hostname)
+            sent_ok = send_telegram(full_message)
         except Exception as e:
             logger.error(f"Telegram send failed: {e}")
             sent_ok = False
@@ -650,7 +671,7 @@ if __name__ == "__main__":
         class TestFormatTimestampIso(unittest.TestCase):
             def test_format(self):
                 dt = datetime(2026, 4, 1, 10, 30, 0, tzinfo=UTC)
-                self.assertEqual(format_timestamp_iso(dt), "2026-04-01T10:30:00Z")
+                self.assertEqual(format_timestamp_iso(dt), "2026-04-01T10:30:00")
 
         class TestValidateSlackdumpAuth(unittest.TestCase):
             @patch("subprocess.run")
@@ -843,19 +864,19 @@ if __name__ == "__main__":
 
                 mock_run.return_value = MagicMock(
                     returncode=0,
-                    stdout="U123\tAlice Smith\tAlice\talice@co.com\nU456\tBob Jones\tBob\tbob@co.com\n",
+                    stdout="Name                   ID           Bot?  Email\nAlice Smith            U123ABC0001        alice@co.com\nBob Jones              U456DEF0002        bob@co.com\n",
                     stderr="",
                 )
                 cache_path = Path(tempfile.mktemp(suffix=".txt"))
                 cache = {}
                 result = resolve_users_via_slackdump(
-                    {"U123", "U456"},
+                    {"U123ABC0001", "U456DEF0002"},
                     cache,
                     cache_path,
                     MagicMock(),
                 )
-                self.assertEqual(result["U123"], "Alice")
-                self.assertEqual(result["U456"], "Bob")
+                self.assertEqual(result["U123ABC0001"], "Alice Smith")
+                self.assertEqual(result["U456DEF0002"], "Bob Jones")
                 cache_path.unlink()
 
             @patch("subprocess.run")
@@ -972,7 +993,7 @@ if __name__ == "__main__":
                 msg = "a" * 5000
                 result = truncate_message(msg, 4000)
                 self.assertLessEqual(len(result), 4000)
-                self.assertIn("truncated", result)
+                self.assertNotIn("truncated", result)
 
             def test_truncates_at_newline(self):
                 msg = "line1\n" * 800

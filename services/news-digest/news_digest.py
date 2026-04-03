@@ -128,6 +128,7 @@ def shorten_url(url: str) -> tuple[str, str | None]:
             headers={
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
+                "User-Agent": "news-digest/1.0",
             },
             method="POST",
         )
@@ -184,6 +185,11 @@ def build_ai_prompt(group_name: str, group_config: dict, feeds_data: dict) -> st
         for item in feed_data.get("items", []):
             item_copy = dict(item)
             item_copy["source"] = feed_name
+            # Use shortened URL if available, remove the separate field
+            if item_copy.get("short_link"):
+                item_copy["link"] = item_copy.pop("short_link")
+            else:
+                item_copy.pop("short_link", None)
             all_items.append(item_copy)
 
     if not all_items:
@@ -196,12 +202,17 @@ def build_ai_prompt(group_name: str, group_config: dict, feeds_data: dict) -> st
             f"You are a news digest assistant. Analyze these news items and create a digest.\n\n"
             f"Language: {lang}\n"
             f"Group: {group_name}\n"
-            f"Format: DETAILED — list individual stories with headlines and short summaries (2-3 sentences).\n"
-            f"For each story include the source name and the shortened URL (use 'short_link' field if available, "
-            f"otherwise 'link').\n"
-            f"Cross-reference: if multiple sources cover the same story, merge them into one entry "
-            f"listing all sources.\n"
-            f"Max 20 stories. Max 3800 characters total.\n"
+            f"Format: DETAILED — for each story:\n"
+            f"1. Bold headline followed by em dash and 2-3 sentence summary.\n"
+            f"2. On the NEXT LINE: one URL followed by source names in parentheses.\n"
+            f"   Example:\n"
+            f"   *Headline here* — summary text.\n"
+            f"   https://spoo.me/abc (Source1, Source2)\n"
+            f"When multiple sources cover the same story, merge into one entry but use only ONE URL.\n"
+            f"Rank stories by importance and significance — most important first.\n"
+            f"Do NOT include a title or header — it will be added separately.\n"
+            f"Do NOT include a source list footer — it will be added separately.\n"
+            f"Max 20 stories. Max 3500 characters total.\n"
             f"Use Telegram Markdown V1 formatting (bold with *, no other markdown).\n\n"
             f"News items:\n{items_json}"
         )
@@ -217,26 +228,48 @@ def build_ai_prompt(group_name: str, group_config: dict, feeds_data: dict) -> st
             f"Group: {group_name}\n"
             f"Format: SUMMARY — write 3-5 sentence narrative paragraphs per subcategory/topic.\n"
             f"No per-story URLs needed. Attribute information to source names where relevant.\n"
-            f"Max 3800 characters total.\n"
+            f"Rank topics by importance and significance — most important first.\n"
+            f"Do NOT include a title or header — it will be added separately.\n"
+            f"Do NOT include a source list footer — it will be added separately.\n"
+            f"Max 3500 characters total.\n"
             f"Use Telegram Markdown V1 formatting (bold with *, no other markdown).\n"
             f"{subcat_info}\n"
             f"News items:\n{items_json}"
         )
 
 
+def format_group_title(group_name: str, mode: str) -> str:
+    """Format group name into a display title."""
+    words = group_name.replace("-", " ").split()
+    formatted = []
+    for w in words:
+        if len(w) <= 2:
+            formatted.append(w.upper())
+        else:
+            formatted.append(w.capitalize())
+    base = " ".join(formatted)
+    return f"{base} Digest" if mode == "detailed" else f"{base} Summary"
+
+
 def truncate_message(message: str, max_len: int = 4000) -> str:
-    """Truncate message from the bottom if it exceeds max_len."""
+    """Truncate message at last complete block (double newline) within max_len.
+
+    Cuts cleanly without adding any truncation notice.
+    """
     if max_len < 80:
         max_len = 80
     if len(message) <= max_len:
         return message
-    # Leave room for truncation notice
-    truncated = message[: max_len - 40]
-    # Try to cut at last newline
+    truncated = message[:max_len]
+    # Try to cut at last double newline (end of a news item)
+    last_block = truncated.rfind("\n\n")
+    if last_block > max_len // 2:
+        return truncated[:last_block]
+    # Fallback: cut at last single newline
     last_nl = truncated.rfind("\n")
     if last_nl > max_len // 2:
-        truncated = truncated[:last_nl]
-    return truncated + "\n\n... (truncated)"
+        return truncated[:last_nl]
+    return truncated
 
 
 def format_warnings(warnings: list[str]) -> str:
@@ -347,23 +380,41 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
             continue
 
         # Call AI
+        llm_provider = config.get("llm_provider", "claude")
+        llm_model = config.get("llm_model", "")
+        llm_effort = config.get("llm_model_effort", "")
         try:
-            digest_text = call_ai(prompt)
+            digest_text = call_ai(prompt, provider=llm_provider, model=llm_model, effort=llm_effort)
         except AIError as e:
             logger.error(f"AI call failed for group {group_name}: {e}")
             send_telegram(f"news-digest FATAL: AI call failed for group {group_name}: {e}", hostname=hostname)
             continue
 
-        # Truncate AI text first, then append warnings so warnings survive
-        # Account for hostname prefix added by send_telegram
-        warning_text = format_warnings(warnings)
-        prefix_len = len(f"*{hostname}* — ") if hostname else 0
-        digest_text = truncate_message(digest_text, max_len=4000 - len(warning_text) - prefix_len)
-        digest_text += warning_text
+        # Build title header
+        from datetime import UTC, datetime
 
-        # Send via telegram
+        date_str = datetime.now(UTC).strftime("%B %-d, %Y")
+        title = format_group_title(group_name, mode)
+        header = f"\\[{hostname}] *{title}* ({date_str})" if hostname else f"*{title}* ({date_str})"
+
+        # Build source footer from feeds that had items
+        source_names = []
+        for feed_name, feed_data in group_feeds.get("feeds", {}).items():
+            if not feed_data.get("error") and feed_data.get("items"):
+                source_names.append(feed_name)
+        sources_footer = "\n\nSources: " + ", ".join(source_names) if source_names else ""
+
+        # Truncate AI text to fit within limit, preserving header and footer
+        warning_text = format_warnings(warnings)
+        fixed_len = len(header) + len("\n\n") + len(sources_footer) + len(warning_text)
+        digest_text = truncate_message(digest_text, max_len=4000 - fixed_len)
+
+        # Assemble final message
+        full_message = header + "\n\n" + digest_text + sources_footer + warning_text
+
+        # Send via telegram (no hostname — it's already in the header)
         try:
-            sent_ok = send_telegram(digest_text, hostname=hostname)
+            sent_ok = send_telegram(full_message)
         except Exception as e:
             logger.error(f"Telegram send failed for group {group_name}: {e}")
             sent_ok = False
@@ -650,13 +701,22 @@ if __name__ == "__main__":
                 msg = "a" * 5000
                 result = truncate_message(msg, 4000)
                 self.assertLessEqual(len(result), 4000)
-                self.assertIn("truncated", result)
 
             def test_truncates_at_newline(self):
                 msg = "line1\n" * 800
                 result = truncate_message(msg, 100)
                 self.assertLessEqual(len(result), 100)
-                self.assertIn("truncated", result)
+
+            def test_truncates_at_double_newline(self):
+                block = "x" * 40
+                msg = f"{block}\n\n{block}\n\n{block}"
+                result = truncate_message(msg, 100)
+                self.assertEqual(result, f"{block}\n\n{block}")
+
+            def test_no_truncation_notice(self):
+                msg = "a" * 5000
+                result = truncate_message(msg, 100)
+                self.assertNotIn("truncated", result)
 
         class TestFormatWarnings(unittest.TestCase):
             def test_no_warnings(self):

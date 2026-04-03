@@ -27,6 +27,9 @@ def send_telegram(message: str, hostname: str = "") -> bool:
     else:
         full_message = message
 
+    # Sanitize unbalanced Markdown V1 bold markers
+    full_message = _sanitize_markdown_v1(full_message)
+
     # Auto-split messages exceeding 4000 chars
     chunks = _split_message(full_message, max_len=4000)
 
@@ -35,6 +38,19 @@ def send_telegram(message: str, hostname: str = "") -> bool:
         if not _send_chunk(chunk):
             success = False
     return success
+
+
+def _sanitize_markdown_v1(text: str) -> str:
+    """Fix unbalanced Markdown V1 bold/italic markers that would cause send failures.
+
+    If * or _ appear an odd number of times, escape the last unmatched one.
+    """
+    for char in ("*", "_"):
+        if text.count(char) % 2 != 0:
+            # Escape the last occurrence
+            idx = text.rfind(char)
+            text = text[:idx] + "\\" + text[idx:]
+    return text
 
 
 def _escape_markdown_v1(text: str) -> str:

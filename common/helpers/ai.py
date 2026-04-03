@@ -1,75 +1,114 @@
-"""AI helper — invoke claude -p for content analysis and summarization."""
+"""AI helper — invoke LLM providers (claude, codex) for content analysis and summarization."""
 
 import json
 import subprocess
 import sys
+import tempfile
 
 
 class AIError(Exception):
-    """Raised when claude -p returns a non-zero exit code."""
+    """Raised when an LLM call fails."""
 
 
-def call_ai(prompt: str, model: str = "", timeout: int = 600) -> str:
-    """Invoke claude -p with the given prompt and return stdout.
+def call_ai(
+    prompt: str, provider: str = "claude", model: str = "", effort: str = "", timeout: int = 600
+) -> str:
+    """Invoke an LLM provider and return the text response.
 
     Args:
-        prompt: The prompt text to send to claude.
-        model: Optional model name (passed via --model flag).
+        prompt: The prompt text to send.
+        provider: LLM provider — "claude" or "codex".
+        model: Optional model name.
+        effort: Optional reasoning effort (codex only, e.g. "high", "xhigh").
         timeout: Subprocess timeout in seconds (default 600).
 
     Returns:
-        The stdout output from claude -p.
+        The text response from the LLM.
 
     Raises:
-        AIError: If claude -p exits with a non-zero code.
+        AIError: If the LLM call fails.
     """
-    cmd = ["claude", "-p"]
-    if model:
-        cmd.extend(["--model", model])
-
-    try:
-        result = subprocess.run(
-            cmd,
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        raise AIError(f"claude -p timed out after {timeout}s") from None
-    except FileNotFoundError:
-        raise AIError("claude binary not found — is it installed and on PATH?") from None
-
-    if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise AIError(f"claude -p failed (exit {result.returncode}): {stderr}")
-
-    return result.stdout.strip()
+    if provider == "codex":
+        return _call_codex(prompt, model=model, effort=effort, timeout=timeout)
+    return _call_claude(prompt, model=model, timeout=timeout)
 
 
-def call_ai_json(prompt: str, model: str = "", timeout: int = 600) -> dict | list:
-    """Invoke claude -p and parse the response as JSON.
+def call_ai_json(
+    prompt: str, provider: str = "claude", model: str = "", effort: str = "", timeout: int = 600
+) -> dict | list:
+    """Invoke an LLM provider and parse the response as JSON.
 
     Args:
-        prompt: The prompt text to send to claude.
+        prompt: The prompt text to send.
+        provider: LLM provider — "claude" or "codex".
         model: Optional model name.
+        effort: Optional reasoning effort (codex only).
         timeout: Subprocess timeout in seconds.
 
     Returns:
         Parsed JSON response (dict or list).
 
     Raises:
-        AIError: If claude -p fails or response is not valid JSON.
+        AIError: If the LLM call fails or response is not valid JSON.
     """
-    response = call_ai(prompt, model=model, timeout=timeout)
-
-    # Try to extract JSON from response (claude may include markdown fences)
+    response = call_ai(prompt, provider=provider, model=model, effort=effort, timeout=timeout)
     cleaned = _extract_json(response)
-
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as e:
         raise AIError(f"Failed to parse AI response as JSON: {e}\nResponse: {response[:500]}") from e
+
+
+def _call_claude(prompt: str, model: str = "", timeout: int = 600) -> str:
+    """Invoke claude -p."""
+    cmd = ["claude", "-p"]
+    if model:
+        cmd.extend(["--model", model])
+    try:
+        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise AIError(f"claude -p timed out after {timeout}s") from None
+    except FileNotFoundError:
+        raise AIError("claude binary not found — is it installed and on PATH?") from None
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise AIError(f"claude -p failed (exit {result.returncode}): {stderr}")
+    return result.stdout.strip()
+
+
+def _call_codex(prompt: str, model: str = "", effort: str = "", timeout: int = 600) -> str:
+    """Invoke codex exec with output to a temp file."""
+    cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check"]
+    if model:
+        cmd.extend(["-m", model])
+    if effort:
+        cmd.extend(["-c", f"reasoning_effort={effort}"])
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as out_file:
+        out_path = out_file.name
+    cmd.extend(["-o", out_path])
+
+    try:
+        result = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise AIError(f"codex exec timed out after {timeout}s") from None
+    except FileNotFoundError:
+        raise AIError("codex binary not found — is it installed and on PATH?") from None
+    finally:
+        import os
+
+        try:
+            output = open(out_path).read().strip()
+            os.unlink(out_path)
+        except OSError:
+            output = ""
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        raise AIError(f"codex exec failed (exit {result.returncode}): {stderr}")
+    if not output:
+        raise AIError("codex exec returned empty output")
+    return output
 
 
 def _extract_json(text: str) -> str:
@@ -95,10 +134,11 @@ def _extract_json(text: str) -> str:
 # --- Embedded tests ---
 if __name__ == "__main__":
     if "--tests" in sys.argv:
+        import os
         import unittest
         from unittest.mock import MagicMock, patch
 
-        class TestCallAI(unittest.TestCase):
+        class TestCallClaude(unittest.TestCase):
             @patch("subprocess.run")
             def test_basic_call(self, mock_run):
                 mock_run.return_value = MagicMock(returncode=0, stdout="response text\n", stderr="")
@@ -115,6 +155,13 @@ if __name__ == "__main__":
                 call_ai("prompt", model="sonnet")
                 cmd = mock_run.call_args[0][0]
                 self.assertEqual(cmd, ["claude", "-p", "--model", "sonnet"])
+
+            @patch("subprocess.run")
+            def test_explicit_claude_provider(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+                call_ai("prompt", provider="claude", model="haiku")
+                cmd = mock_run.call_args[0][0]
+                self.assertEqual(cmd, ["claude", "-p", "--model", "haiku"])
 
             @patch("subprocess.run")
             def test_raises_on_failure(self, mock_run):
@@ -143,6 +190,51 @@ if __name__ == "__main__":
                     call_ai("prompt")
                 self.assertIn("not found", str(ctx.exception))
 
+        class TestCallCodex(unittest.TestCase):
+            @patch("subprocess.run")
+            def test_basic_codex_call(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                # Write response to the output file codex would use
+                with patch("builtins.open", create=True) as mock_open:
+                    mock_open.return_value.__enter__ = lambda s: s
+                    mock_open.return_value.__exit__ = MagicMock(return_value=False)
+                    mock_open.return_value.read = MagicMock(return_value="codex response\n")
+                    with patch("os.unlink"):
+                        result = _call_codex("test prompt", model="gpt-5.4")
+                self.assertEqual(result, "codex response")
+                cmd = mock_run.call_args[0][0]
+                self.assertIn("codex", cmd)
+                self.assertIn("exec", cmd)
+                self.assertIn("--ephemeral", cmd)
+                self.assertIn("-m", cmd)
+                self.assertIn("gpt-5.4", cmd)
+
+            @patch("subprocess.run")
+            def test_codex_with_effort(self, mock_run):
+                mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+                with patch("builtins.open", create=True) as mock_open:
+                    mock_open.return_value.__enter__ = lambda s: s
+                    mock_open.return_value.__exit__ = MagicMock(return_value=False)
+                    mock_open.return_value.read = MagicMock(return_value="ok")
+                    with patch("os.unlink"):
+                        _call_codex("prompt", model="gpt-5.4", effort="xhigh")
+                cmd = mock_run.call_args[0][0]
+                self.assertIn("-c", cmd)
+                idx = cmd.index("-c")
+                self.assertEqual(cmd[idx + 1], "reasoning_effort=xhigh")
+
+            @patch("subprocess.run")
+            def test_codex_timeout(self, mock_run):
+                mock_run.side_effect = subprocess.TimeoutExpired(cmd="codex", timeout=600)
+                with patch("builtins.open", create=True) as mock_open:
+                    mock_open.return_value.__enter__ = lambda s: s
+                    mock_open.return_value.__exit__ = MagicMock(return_value=False)
+                    mock_open.return_value.read = MagicMock(return_value="")
+                    with patch("os.unlink"):
+                        with self.assertRaises(AIError) as ctx:
+                            _call_codex("prompt")
+                self.assertIn("timed out", str(ctx.exception))
+
         class TestCallAIJson(unittest.TestCase):
             @patch("__main__.call_ai")
             def test_parses_json(self, mock_ai):
@@ -168,6 +260,14 @@ if __name__ == "__main__":
                 mock_ai.return_value = "[1, 2, 3]"
                 result = call_ai_json("prompt")
                 self.assertEqual(result, [1, 2, 3])
+
+            @patch("__main__.call_ai")
+            def test_passes_provider_and_effort(self, mock_ai):
+                mock_ai.return_value = '{"ok": true}'
+                call_ai_json("prompt", provider="codex", model="gpt-5.4", effort="xhigh")
+                mock_ai.assert_called_once_with(
+                    "prompt", provider="codex", model="gpt-5.4", effort="xhigh", timeout=600
+                )
 
         class TestExtractJson(unittest.TestCase):
             def test_plain_json(self):

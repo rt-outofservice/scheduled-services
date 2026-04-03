@@ -13,7 +13,7 @@
 #           pr-auto-approve (PR_AUTO_APPROVE)
 
 user: rt
-inventory: ../../inventory.yml
+inventory: inventory.yml
 local_shell: /bin/bash
 
 targets:
@@ -53,8 +53,9 @@ tasks:
 
       - name: check-required-tools
         script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           missing=()
-          for tool in uv yq python3 rsync claude; do
+          for tool in uv yq python3 rsync claude codex; do
             command -v "$tool" &>/dev/null || missing+=("$tool")
           done
 
@@ -95,6 +96,7 @@ tasks:
 
       - name: install-project-files
         script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           mkdir -p ~/.scheduled-services
           rsync -a --delete \
             --exclude '__pycache__' \
@@ -113,6 +115,7 @@ tasks:
 
       - name: install-version
         script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           version=$(cat /tmp/.sched-svc-version 2>/dev/null || echo "unknown")
           echo "$version" > ~/.scheduled-services/.version
           echo "Deployed version: $version"
@@ -122,7 +125,9 @@ tasks:
     on_error: *on_error
     commands:
       - name: uv-sync
-        script: cd ~/.scheduled-services && uv sync --native-tls
+        script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
+          cd ~/.scheduled-services && uv sync --native-tls
 
   # ── Generate Configs ───────────────────────────────────────
   - name: generate-configs
@@ -130,6 +135,7 @@ tasks:
     commands:
       - name: write-service-configs
         script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           write_config() {
             local svc="$1" prefix="$2"
             local config_var="${prefix}_SERVICE_CONFIG"
@@ -142,7 +148,7 @@ tasks:
             fi
 
             mkdir -p "$(dirname "$config_path")"
-            printf '%s\n' "$config_content" > "$config_path"
+            printf '%b\n' "$config_content" > "$config_path"
             chmod 600 "$config_path"
 
             if ! yq '.' "$config_path" > /dev/null 2>&1; then
@@ -166,6 +172,7 @@ tasks:
     commands:
       - name: update-crontab
         script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           current=$(crontab -l 2>/dev/null || true)
 
           # Remove all managed:scheduled-* tagged blocks
@@ -179,7 +186,8 @@ tasks:
           add_schedule() {
             local svc="$1" prefix="$2"
             local cron_var="${prefix}_CRON_SCHEDULE"
-            local cron_content="${!cron_var:-}"
+            local cron_content
+            cron_content=$(printf '%b' "${!cron_var:-}")
             local enabled_var="${prefix}_ENABLED"
 
             if [[ "${!enabled_var:-false}" != "true" || -z "$cron_content" ]]; then
@@ -206,27 +214,32 @@ tasks:
             final="${final}${new_entries}"
           fi
 
-          # Trim trailing blank lines
-          final=$(printf '%s' "$final" | sed -e :a -e '/^\n*$/{$d;N;ba;}')
+          # Trim trailing blank lines (compatible with both GNU and BSD sed)
+          while [[ "$final" == *$'\n' ]]; do
+            final="${final%$'\n'}"
+          done
 
-          # Validate cron syntax
-          platform=$(uname -s | tr '[:upper:]' '[:lower:]')
-          if [[ "$platform" == "linux" ]]; then
-            validation_output=$(printf '%s\n' "$final" | crontab -T - 2>&1)
-            rc=$?
+          # Validate cron syntax (try crontab -n, then -T, then regex fallback)
+          cron_validated=false
+          for flag in -n -T; do
+            validation_output=$(printf '%s\n' "$final" | crontab "$flag" - 2>&1) && rc=0 || rc=$?
             if [[ $rc -eq 0 ]]; then
-              echo "Crontab validated (crontab -T)"
-            elif echo "$validation_output" | grep -qi "invalid option\|unknown option\|unrecognized option\|illegal option"; then
-              echo "WARNING: crontab -T unavailable — skipping syntax validation"
-            else
-              echo "ERROR: crontab syntax validation failed: $validation_output" >&2
-              exit 1
+              echo "Crontab validated (crontab $flag)"
+              cron_validated=true
+              break
             fi
-          else
-            # macOS: basic regex validation of 5-field cron schedule
+            # If the flag itself is unsupported, try next
+            if echo "$validation_output" | grep -qi "invalid option\|unknown option\|unrecognized option\|illegal option"; then
+              continue
+            fi
+            # Flag is supported but syntax failed
+            echo "ERROR: crontab syntax validation failed: $validation_output" >&2
+            exit 1
+          done
+          if ! $cron_validated; then
+            # Neither -n nor -T available — regex fallback
             while IFS= read -r line; do
               [[ "$line" == \#* || -z "$line" ]] && continue
-              # Skip variable assignments (e.g. SHELL=/bin/bash, PATH=..., MAILTO="")
               before_space="${line%% *}"
               [[ "$before_space" == *=* ]] && continue
               if ! echo "$line" | grep -qE '^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+'; then
@@ -246,6 +259,7 @@ tasks:
     commands:
       - name: send-completion-notification
         script: |
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           tg_loaded=false
           for f in ~/.bash.d/telegram.bash ~/.zsh.d/telegram.zsh; do
             [ -f "$f" ] && . "$f" && tg_loaded=true && break
