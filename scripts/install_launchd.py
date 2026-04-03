@@ -37,6 +37,8 @@ def expand_schedule(entries):
     """
     results = []
     for entry in entries:
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"schedule entry is not a mapping: {entry!r}")
         arrays = {}
         scalars = {}
         for k in CALENDAR_KEYS:
@@ -181,6 +183,8 @@ def install_service(svc, prefix, template, prefix_tag, agents_dir):
     os.makedirs(log_dir, exist_ok=True)
 
     for i, job in enumerate(jobs):
+        if not isinstance(job, dict):
+            raise RuntimeError(f"{svc} job {i} is not a mapping (got {type(job).__name__})")
         command = job.get("command")
         if not command:
             raise RuntimeError(f"{svc} job {i} missing 'command' field")
@@ -289,6 +293,11 @@ class TestScheduleExpansion(unittest.TestCase):
         entries = [{"Minute": 0, "Hour": 9, "Bogus": 42}]
         result = expand_schedule(entries)
         self.assertEqual(result, [{"Minute": 0, "Hour": 9}])
+
+    def test_non_dict_entry_raises(self):
+        with self.assertRaises(RuntimeError) as ctx:
+            expand_schedule(["0 9 * * *"])
+        self.assertIn("not a mapping", str(ctx.exception))
 
 
 class TestScheduleToXml(unittest.TestCase):
@@ -481,6 +490,19 @@ class TestErrorCases(unittest.TestCase):
     def test_disabled_service_only_removes(self, mock_remove):
         install_service("svc", "TEST", "tpl", "tag", "/tmp/agents")
         mock_remove.assert_called_once()
+
+    @patch("__main__.remove_existing_agents")
+    @patch.dict(
+        os.environ,
+        {
+            "TEST_ENABLED": "true",
+            "TEST_LAUNCHD_SCHEDULE": yaml.dump([42, "string"]),
+        },
+    )
+    def test_non_dict_job_raises(self, mock_remove):
+        with self.assertRaises(RuntimeError) as ctx:
+            install_service("svc", "TEST", "tpl", "tag", "/tmp")
+        self.assertIn("not a mapping", str(ctx.exception))
 
 
 class TestParseSvcArgs(unittest.TestCase):

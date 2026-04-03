@@ -54,11 +54,11 @@ tasks:
       - name: check-platform-requirements
         script: |
           os=$(uname -s)
-          declare -A req=([news-digest:NEWS_DIGEST]=Linux [pr-auto-approve:PR_AUTO_APPROVE]=Darwin [slack-summary:SLACK_SUMMARY]=Darwin [teams-summary:TEAMS_SUMMARY]=Darwin)
           errors=()
-          for sp in "${!req[@]}"; do
-            svc="${sp%%:*}"; prefix="${sp##*:}"; ev="${prefix}_ENABLED"
-            [[ "${!ev:-false}" == "true" && "$os" != "${req[$sp]}" ]] && errors+=("$svc requires ${req[$sp]} but target is $os")
+          for entry in news-digest:NEWS_DIGEST:Linux pr-auto-approve:PR_AUTO_APPROVE:Darwin slack-summary:SLACK_SUMMARY:Darwin teams-summary:TEAMS_SUMMARY:Darwin; do
+            svc="${entry%%:*}"; rest="${entry#*:}"; prefix="${rest%%:*}"; required="${rest##*:}"
+            ev="${prefix}_ENABLED"
+            [[ "${!ev:-false}" == "true" && "$os" != "$required" ]] && errors+=("$svc requires $required but target is $os")
           done
           [[ ${#errors[@]} -gt 0 ]] && printf 'ERROR: %s\n' "${errors[@]}" >&2 && exit 1
           echo "Platform checks passed ($os)"

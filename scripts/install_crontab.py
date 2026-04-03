@@ -49,6 +49,8 @@ def strip_managed_blocks(text):
             continue
         if not skip:
             out.append(line)
+    if skip:
+        print("WARNING: unterminated managed block in crontab", file=sys.stderr)
     return "\n".join(out)
 
 
@@ -244,6 +246,17 @@ class TestStripManagedBlocks(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(strip_managed_blocks(""), "")
+
+    def test_unclosed_begin_warns(self):
+        text = "0 * * * * /usr/bin/keep\n# BEGIN managed:scheduled-broken\norphaned line"
+        import io
+
+        stderr = io.StringIO()
+        with patch("sys.stderr", stderr):
+            result = strip_managed_blocks(text)
+        self.assertIn("unterminated managed block", stderr.getvalue())
+        self.assertIn("/usr/bin/keep", result)
+        self.assertNotIn("orphaned", result)
 
 
 class TestBuildManagedBlock(unittest.TestCase):

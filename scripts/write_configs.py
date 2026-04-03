@@ -39,10 +39,8 @@ def write_config(svc, prefix, base_dir):
         print(f"{svc}: no SERVICE_CONFIG — skipping")
         return False
 
-    # Decode escape sequences (env vars come through printf '%b')
-    decoded = config_content.encode().decode("unicode_escape")
-
     # Validate YAML before writing
+    decoded = config_content
     try:
         yaml.safe_load(decoded)
     except yaml.YAMLError as e:
@@ -109,7 +107,7 @@ class TestWriteConfig(unittest.TestCase):
 
         shutil.rmtree(self.tmpdir)
 
-    @patch.dict(os.environ, {"TEST_SERVICE_CONFIG": "hostname: myhost\\nport: 8080"})
+    @patch.dict(os.environ, {"TEST_SERVICE_CONFIG": "hostname: myhost\nport: 8080"})
     def test_writes_valid_yaml(self):
         result = write_config("test-svc", "TEST", self.tmpdir)
         self.assertTrue(result)
@@ -119,7 +117,7 @@ class TestWriteConfig(unittest.TestCase):
         self.assertEqual(data["hostname"], "myhost")
         self.assertEqual(data["port"], 8080)
 
-    @patch.dict(os.environ, {"TEST_SERVICE_CONFIG": "hostname: myhost\\nport: 8080"})
+    @patch.dict(os.environ, {"TEST_SERVICE_CONFIG": "hostname: myhost\nport: 8080"})
     def test_sets_permissions_600(self):
         write_config("test-svc", "TEST", self.tmpdir)
         config_path = Path(self.tmpdir) / "services" / "test-svc" / "config.yaml"
@@ -144,7 +142,7 @@ class TestWriteConfig(unittest.TestCase):
         config_path = Path(deep_base) / "services" / "test-svc" / "config.yaml"
         self.assertTrue(config_path.exists())
 
-    @patch.dict(os.environ, {"TEST_SERVICE_CONFIG": "valid: true\\nlist:\\n  - one\\n  - two"})
+    @patch.dict(os.environ, {"TEST_SERVICE_CONFIG": "valid: true\nlist:\n  - one\n  - two"})
     def test_multiline_yaml(self):
         write_config("test-svc", "TEST", self.tmpdir)
         config_path = Path(self.tmpdir) / "services" / "test-svc" / "config.yaml"
