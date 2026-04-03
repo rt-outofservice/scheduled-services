@@ -197,6 +197,7 @@ tasks:
             fi
 
             new_entries+="# BEGIN managed:scheduled-${svc}"$'\n'
+            new_entries+="PATH=\$HOME/.local/bin:\$HOME/.bin:/opt/homebrew/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin"$'\n'
             while IFS= read -r line || [[ -n "$line" ]]; do
               [[ -z "$line" ]] && continue
               new_entries+="${line}"$'\n'
