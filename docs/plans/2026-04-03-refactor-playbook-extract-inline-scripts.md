@@ -81,10 +81,10 @@ write_configs.py [--tests] --base-dir PATH svc:PREFIX [svc:PREFIX ...]
 ```
 Reads `<PREFIX>_ENABLED` and `<PREFIX>_SERVICE_CONFIG` from environment variables.
 
-- [ ] Implement config reading from env vars, YAML writing with validation (PyYAML), and permission setting (mode 600)
-- [ ] Implement CLI argument parsing and main entry point
-- [ ] Write embedded tests: config writing and reading back, YAML validation (valid + invalid), permission verification, skip when no config, missing directory handling
-- [ ] Run tests: `uv run python scripts/write_configs.py --tests`
+- [x] Implement config reading from env vars, YAML writing with validation (PyYAML), and permission setting (mode 600)
+- [x] Implement CLI argument parsing and main entry point
+- [x] Write embedded tests: config writing and reading back, YAML validation (valid + invalid), permission verification, skip when no config, missing directory handling
+- [x] Run tests: `uv run python scripts/write_configs.py --tests`
 
 ### Task 4: Refactor `playbook.main.yaml`
 
