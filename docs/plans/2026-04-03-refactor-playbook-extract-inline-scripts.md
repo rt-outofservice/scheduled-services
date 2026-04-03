@@ -40,12 +40,12 @@ install_launchd.py [--tests] --template PATH --agents-dir PATH --prefix-tag TAG 
 ```
 Reads `<PREFIX>_ENABLED` and `<PREFIX>_LAUNCHD_SCHEDULE` from environment variables.
 
-- [ ] Implement schedule YAML parsing and cartesian-product expansion (replaces inline Python at playbook lines 328-353)
-- [ ] Implement plist generation from template: placeholder substitution, XML-escaping commands, StartCalendarInterval XML building (replaces build_plist function, lines 357-405)
-- [ ] Implement agent lifecycle: remove existing agents, validate with plutil, bootstrap with launchctl (replaces install_service function, lines 410-487)
-- [ ] Implement CLI argument parsing and main entry point
-- [ ] Write embedded tests: schedule expansion (scalar + array + mixed), XML generation, plist template rendering, label naming (single-job vs multi-job), error cases
-- [ ] Run tests: `uv run python scripts/install_launchd.py --tests`
+- [x] Implement schedule YAML parsing and cartesian-product expansion (replaces inline Python at playbook lines 328-353)
+- [x] Implement plist generation from template: placeholder substitution, XML-escaping commands, StartCalendarInterval XML building (replaces build_plist function, lines 357-405)
+- [x] Implement agent lifecycle: remove existing agents, validate with plutil, bootstrap with launchctl (replaces install_service function, lines 410-487)
+- [x] Implement CLI argument parsing and main entry point
+- [x] Write embedded tests: schedule expansion (scalar + array + mixed), XML generation, plist template rendering, label naming (single-job vs multi-job), error cases
+- [x] Run tests: `uv run python scripts/install_launchd.py --tests`
 
 ### Task 2: Create `scripts/install_crontab.py`
 
