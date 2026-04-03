@@ -212,9 +212,7 @@ def _filter_repos(repos: list[str], include_only: list[str], exclude: list[str])
 # --- PR/MR listing ---
 
 
-def list_prs(
-    repo: str, provider: str, own_username: str, skip_bots: bool, logger: logging.Logger
-) -> list[dict]:
+def list_prs(repo: str, provider: str, own_username: str, skip_bots: bool, logger: logging.Logger) -> list[dict]:
     """List open non-draft PRs/MRs for a repo, excluding own and optionally bots."""
     if provider == "github":
         return _list_github_prs(repo, own_username, skip_bots, logger)
@@ -223,9 +221,7 @@ def list_prs(
     return []
 
 
-def _list_github_prs(
-    repo: str, own_username: str, skip_bots: bool, logger: logging.Logger
-) -> list[dict]:
+def _list_github_prs(repo: str, own_username: str, skip_bots: bool, logger: logging.Logger) -> list[dict]:
     """List open non-draft PRs on a GitHub repo."""
     cmd = [
         "gh",
@@ -270,9 +266,7 @@ def _list_github_prs(
     return filtered
 
 
-def _list_gitlab_mrs(
-    repo: str, own_username: str, skip_bots: bool, logger: logging.Logger
-) -> list[dict]:
+def _list_gitlab_mrs(repo: str, own_username: str, skip_bots: bool, logger: logging.Logger) -> list[dict]:
     """List open non-draft MRs on a GitLab project."""
     encoded = _encode_gitlab_path(repo)
     cmd = ["glab", "api", f"projects/{encoded}/merge_requests?state=opened&per_page=20"]
@@ -321,9 +315,7 @@ def touches_production(title: str, diff: str) -> bool:
     return bool(_PROD_PATTERNS.search(title) or _PROD_PATTERNS.search(diff))
 
 
-def is_already_approved(
-    repo: str, pr_number: int, own_username: str, provider: str, logger: logging.Logger
-) -> bool:
+def is_already_approved(repo: str, pr_number: int, own_username: str, provider: str, logger: logging.Logger) -> bool:
     """Check if we already approved this PR/MR."""
     if provider == "github":
         cmd = ["gh", "api", f"repos/{repo}/pulls/{pr_number}/reviews"]
@@ -350,7 +342,12 @@ def is_already_approved(
 
 
 def check_complexity(
-    pr_data: dict, repo: str, pr_number: int, provider: str, max_files: int, max_lines: int,
+    pr_data: dict,
+    repo: str,
+    pr_number: int,
+    provider: str,
+    max_files: int,
+    max_lines: int,
     logger: logging.Logger,
 ) -> tuple[bool, int, int]:
     """Check PR/MR complexity. Returns (within_limits, files_changed, lines_changed).
@@ -590,8 +587,19 @@ def _run_review_inner(config_path: Path, logger: logging.Logger) -> None:
 
     try:
         _run_review_loop(
-            targets, hostname, skip_bots, repo_limit, max_files, max_lines, approval_cap,
-            llm_provider, llm_model, llm_effort, reviews_file, warnings, logger,
+            targets,
+            hostname,
+            skip_bots,
+            repo_limit,
+            max_files,
+            max_lines,
+            approval_cap,
+            llm_provider,
+            llm_model,
+            llm_effort,
+            reviews_file,
+            warnings,
+            logger,
         )
     finally:
         if has_gitlab:
@@ -681,7 +689,13 @@ def _run_review_loop(
                     continue
 
                 within, files, lines = check_complexity(
-                    pr, repo, pr_number, provider, max_files, max_lines, logger,
+                    pr,
+                    repo,
+                    pr_number,
+                    provider,
+                    max_files,
+                    max_lines,
+                    logger,
                 )
                 if not within:
                     if files < 0:
@@ -712,8 +726,13 @@ def _run_review_loop(
                 if touches_production(pr_title, diff):
                     logger.info(f"Production changes detected: {repo}#{pr_number}, skipping")
                     append_review(
-                        reviews_file, repo, pr_number, pr["author"], pr_title,
-                        "production environment changes", "skipped-production",
+                        reviews_file,
+                        repo,
+                        pr_number,
+                        pr["author"],
+                        pr_title,
+                        "production environment changes",
+                        "skipped-production",
                     )
                     continue
 

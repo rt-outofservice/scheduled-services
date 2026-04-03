@@ -40,16 +40,34 @@ def send_telegram(message: str, hostname: str = "") -> bool:
     return success
 
 
+def _count_preceding_backslashes(text: str, pos: int) -> int:
+    """Count consecutive backslashes immediately before position pos."""
+    count = 0
+    j = pos - 1
+    while j >= 0 and text[j] == "\\":
+        count += 1
+        j -= 1
+    return count
+
+
 def _sanitize_markdown_v1(text: str) -> str:
     """Fix unbalanced Markdown V1 bold/italic markers that would cause send failures.
 
-    If * or _ appear an odd number of times, escape the last unmatched one.
+    If * or _ appear an odd number of unescaped times, escape the last unmatched one.
+    A character is unescaped when preceded by an even number of backslashes (including zero).
     """
     for char in ("*", "_"):
-        if text.count(char) % 2 != 0:
-            # Escape the last occurrence
-            idx = text.rfind(char)
-            text = text[:idx] + "\\" + text[idx:]
+        # Count only unescaped occurrences
+        count = 0
+        for i, c in enumerate(text):
+            if c == char and _count_preceding_backslashes(text, i) % 2 == 0:
+                count += 1
+        if count % 2 != 0:
+            # Escape the last unescaped occurrence
+            for i in range(len(text) - 1, -1, -1):
+                if text[i] == char and _count_preceding_backslashes(text, i) % 2 == 0:
+                    text = text[:i] + "\\" + text[i:]
+                    break
     return text
 
 
@@ -140,6 +158,33 @@ if __name__ == "__main__":
                 result = _escape_markdown_v1("*_`[")
                 self.assertEqual(result, "\\*\\_\\`\\[")
 
+        class TestSanitizeMarkdownV1(unittest.TestCase):
+            def test_balanced_markers_unchanged(self):
+                self.assertEqual(_sanitize_markdown_v1("*bold*"), "*bold*")
+
+            def test_unbalanced_star_escaped(self):
+                result = _sanitize_markdown_v1("hello * world")
+                self.assertEqual(result, "hello \\* world")
+
+            def test_unbalanced_underscore_escaped(self):
+                result = _sanitize_markdown_v1("hello _ world")
+                self.assertEqual(result, "hello \\_ world")
+
+            def test_already_escaped_not_double_escaped(self):
+                # Pre-escaped underscore should not be counted or re-escaped
+                self.assertEqual(_sanitize_markdown_v1("dev\\_ops"), "dev\\_ops")
+
+            def test_already_escaped_star_not_double_escaped(self):
+                self.assertEqual(_sanitize_markdown_v1("hello\\*world"), "hello\\*world")
+
+            def test_mixed_escaped_and_unescaped(self):
+                # One escaped underscore + two unescaped bold markers = all balanced
+                result = _sanitize_markdown_v1("*dev\\_ops*")
+                self.assertEqual(result, "*dev\\_ops*")
+
+            def test_plain_text_unchanged(self):
+                self.assertEqual(_sanitize_markdown_v1("hello world"), "hello world")
+
         class TestSplitMessage(unittest.TestCase):
             def test_short_message_no_split(self):
                 result = _split_message("hello", max_len=4000)
@@ -197,6 +242,23 @@ if __name__ == "__main__":
                 mock_send.assert_called_once()
                 sent = mock_send.call_args[0][0]
                 self.assertTrue(sent.startswith("*my\\_server\\_01* \u2014 "))
+
+            @patch("__main__._send_chunk", return_value=True)
+            def test_hostname_odd_underscores_not_double_escaped(self, mock_send):
+                send_telegram("test msg", hostname="my_server")
+                mock_send.assert_called_once()
+                sent = mock_send.call_args[0][0]
+                # Should be *my\_server* not *my\\_server*
+                self.assertTrue(sent.startswith("*my\\_server* \u2014 "))
+
+            @patch("__main__._send_chunk", return_value=True)
+            def test_pre_escaped_content_not_double_escaped(self, mock_send):
+                # Simulates what teams_summary does: pre-escape then wrap in bold
+                send_telegram("*dev\\_ops*\nSome summary")
+                mock_send.assert_called_once()
+                sent = mock_send.call_args[0][0]
+                self.assertIn("*dev\\_ops*", sent)
+                self.assertNotIn("dev\\\\_ops", sent)
 
             @patch("__main__._send_chunk", return_value=True)
             def test_empty_message_skipped(self, mock_send):

@@ -399,7 +399,8 @@ def build_ai_prompt(
         "- Focus on: technical/operational topics, decisions, incidents, deployments, action items\n"
         "- Skip: casual chat, jokes, food discussions, emoji-only reactions, scheduling\n"
         "- If a channel has no substantive messages, omit it entirely\n"
-        "- If any channels had no substantive messages, end with: No activity: #channel1, #channel2 (plain text, not bold)\n"
+        "- If any channels had no substantive messages, end with: "
+        "No activity: #channel1, #channel2 (plain text, not bold)\n"
         "- Do NOT include a title or header — it will be added separately\n"
         "- Max 3500 characters total\n"
         "- Use Telegram Markdown V1 formatting (bold with *, no other markdown)\n\n"
@@ -864,7 +865,11 @@ if __name__ == "__main__":
 
                 mock_run.return_value = MagicMock(
                     returncode=0,
-                    stdout="Name                   ID           Bot?  Email\nAlice Smith            U123ABC0001        alice@co.com\nBob Jones              U456DEF0002        bob@co.com\n",
+                    stdout=(
+                        "Name                   ID           Bot?  Email\n"
+                        "Alice Smith            U123ABC0001        alice@co.com\n"
+                        "Bob Jones              U456DEF0002        bob@co.com\n"
+                    ),
                     stderr="",
                 )
                 cache_path = Path(tempfile.mktemp(suffix=".txt"))
