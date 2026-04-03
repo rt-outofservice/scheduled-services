@@ -108,5 +108,5 @@ When multiple files for the same channel have overlapping time windows, all are 
 
 ### Task 7: Update documentation
 
-- [ ] Update CLAUDE.md if any new patterns or CLI arguments introduced (add teams-summary to service CLI arguments section, add persistent state if any)
-- [ ] Move this plan to `docs/plans/completed/`
+- [x] Update CLAUDE.md if any new patterns or CLI arguments introduced (add teams-summary to service CLI arguments section, add persistent state if any)
+- [x] Move this plan to `docs/plans/completed/`

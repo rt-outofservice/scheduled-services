@@ -72,6 +72,8 @@ Beyond `--tests`, some services accept additional flags:
 - `news_digest.py --digest-names tech,security` — process only named feed groups
 - `pr_auto_approve.py --day-summary-only` — send day summary from reviews.md, then exit
 - `fetch_feeds.py --hours 24` — standalone feed fetch with time window (reads JSON from stdin)
+- `teams_summary.py --timeframe 14h` — override config timeframe (Nh/Nm/Nd format)
+- `teams_summary.py --notify-on-match "keyword1,keyword2"` — keyword monitoring mode instead of summary
 
 ## Persistent State
 
