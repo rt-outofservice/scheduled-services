@@ -93,14 +93,14 @@ Reads `<PREFIX>_ENABLED` and `<PREFIX>_SERVICE_CONFIG` from environment variable
 
 Replace large inline scripts with calls to new Python scripts. Compress all remaining inline scripts to 10 lines or fewer.
 
-- [ ] Update `sync-project` exclude: change `"scripts"` to `"scripts/migrate.sh"` so deployment scripts are synced to remote
-- [ ] Replace `generate-configs` (31 lines) with ~5-line script calling `uv run python ~/.scheduled-services/scripts/write_configs.py`
-- [ ] Replace `configure-crontab` (82 lines) with ~5-line script calling `uv run python ~/.scheduled-services/scripts/install_crontab.py`
-- [ ] Replace `configure-launchd` (188 lines, including the separate `copy-plist-template` command) with ~8-line script calling `uv run python ~/.scheduled-services/scripts/install_launchd.py`
-- [ ] Compress `platform-checks` from 30 to ~8 lines using compact associative-array loop
-- [ ] Simplify `validate-deps` from 28 to ~10 lines: remove `yq` from required tools list, streamline the .bindeps check loop
-- [ ] Simplify `notify-completion` from 19 to ~10 lines
-- [ ] Verify PATH export is present in all remaining inline scripts (one line per block, acceptable overhead)
+- [x] Update `sync-project` exclude: change `"scripts"` to `"scripts/migrate.sh"` so deployment scripts are synced to remote
+- [x] Replace `generate-configs` (31 lines) with ~5-line script calling `uv run python ~/.scheduled-services/scripts/write_configs.py`
+- [x] Replace `configure-crontab` (82 lines) with ~5-line script calling `uv run python ~/.scheduled-services/scripts/install_crontab.py`
+- [x] Replace `configure-launchd` (188 lines, including the separate `copy-plist-template` command) with ~8-line script calling `uv run python ~/.scheduled-services/scripts/install_launchd.py`
+- [x] Compress `platform-checks` from 30 to ~8 lines using compact associative-array loop
+- [x] Simplify `validate-deps` from 28 to ~10 lines: remove `yq` from required tools list, streamline the .bindeps check loop
+- [x] Simplify `notify-completion` from 19 to ~10 lines
+- [x] Verify PATH export is present in all remaining inline scripts (one line per block, acceptable overhead)
 
 ### Task 5: Update documentation
 
