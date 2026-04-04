@@ -285,8 +285,11 @@ def format_warnings(warnings: list[str]) -> str:
 
 def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None:
     """Main digest execution flow."""
+    import time
+
+    t0 = time.monotonic()
     logger, log_file = setup_logging("news-digest")
-    logger.info("Starting news-digest service")
+    logger.info("*" * 20 + " news-digest starting " + "*" * 20)
 
     # Load config
     try:
@@ -310,6 +313,9 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
     # Extract previously sent headlines for dedup
     sent_headlines = extract_sent_headlines(log_file)
     logger.info(f"Found {len(sent_headlines)} previously sent headlines for dedup")
+
+    total_articles = 0
+    digests_sent = 0
 
     for group_name, group_config in groups.items():
         warnings: list[str] = []
@@ -368,6 +374,7 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
         if total_items == 0:
             logger.info(f"No new items after dedup for group {group_name}")
             continue
+        total_articles += total_items
 
         # URL shortening for detailed mode
         mode = group_config.get("mode", "summary")
@@ -394,11 +401,12 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
             continue
 
         # Build title header
-        from datetime import UTC, datetime
+        from datetime import datetime
 
-        date_str = datetime.now(UTC).strftime("%B %-d, %Y")
+        date_str = datetime.now().strftime("%B %-d, %Y")
         title = format_group_title(group_name, mode)
-        header = f"\\[{hostname}] *{title}* ({date_str})" if hostname else f"*{title}* ({date_str})"
+        title_date = f"{date_str} | Δ{hours}h"
+        header = f"\\[{hostname}] *{title}* ({title_date})" if hostname else f"*{title}* ({title_date})"
 
         # Build source footer from feeds that had items
         source_names = []
@@ -424,6 +432,7 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
 
         # Log sent headlines for future dedup (only if actually delivered)
         if sent_ok:
+            digests_sent += 1
             for _feed_name, feed_data in group_feeds.get("feeds", {}).items():
                 if feed_data.get("error"):
                     continue
@@ -436,7 +445,11 @@ def run_digest(config_path: Path, digest_names: list[str] | None = None) -> None
 
         logger.info(f"Completed group: {group_name}")
 
-    logger.info("News-digest service finished")
+    elapsed = time.monotonic() - t0
+    logger.info(
+        f"{'*' * 20} completed: {len(groups)} groups, {total_articles} articles, "
+        f"{digests_sent} digests sent, elapsed {elapsed / 60:.1f}m {'*' * 20}"
+    )
 
 
 def main() -> None:
