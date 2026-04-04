@@ -472,7 +472,7 @@ def append_review(
             "| Date | Repo | PR# | Author | Title | Summary | Action |\n"
             "|------|------|-----|--------|-------|---------|--------|\n"
         )
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     title_safe = title.replace("\n", " ").replace("|", "/")[:60]
     summary_safe = summary.replace("\n", " ").replace("|", "/")[:80]
     line = f"| {today} | {repo} | #{pr_number} | {author} | {title_safe} | {summary_safe} | {action} |\n"
@@ -484,7 +484,7 @@ def read_today_reviews(reviews_file: Path) -> list[dict]:
     """Read today's review entries from reviews.md."""
     if not reviews_file.exists():
         return []
-    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
     entries = []
     for line in reviews_file.read_text().splitlines():
         if not line.startswith("|") or line.startswith("| Date") or line.startswith("|---"):
@@ -516,14 +516,27 @@ def format_day_summary(entries: list[dict]) -> str:
     """Format day summary body grouped by repo (no title — added by caller)."""
     if not entries:
         return "No reviews today."
+
+    approved = sum(1 for e in entries if e["action"] == "approved")
+    skipped = len(entries) - approved
+    summary_parts = []
+    if approved:
+        summary_parts.append(f"{approved} ✅ approved")
+    if skipped:
+        summary_parts.append(f"{skipped} ❌ skipped")
+    lines = [f"_Summary: {', '.join(summary_parts)}_"]
+
     by_repo: dict[str, list[dict]] = {}
     for e in entries:
         by_repo.setdefault(e["repo"], []).append(e)
-    lines = [f"{len(entries)} reviews:"]
+
     for repo, repo_entries in by_repo.items():
-        lines.append(f"\n{repo}:")
+        lines.append(f"\n*{repo}*")
         for e in repo_entries:
-            lines.append(f"  {e['pr_number']} ({e['author']}): {e['action']} — {e['title']}")
+            icon = "✅" if e["action"] == "approved" else "❌"
+            reason = f" — _{e['summary']}_" if e["summary"] else ""
+            lines.append(f"  {icon} [{e['pr_number']} / @{e['author']}] {e['title']}{reason}")
+
     return "\n".join(lines)
 
 
@@ -539,8 +552,11 @@ def format_warnings(warnings: list[str]) -> str:
 
 def run_review(config_path: Path) -> None:
     """Main review execution flow."""
+    import time
+
+    t0 = time.monotonic()
     logger, _log_file = setup_logging("pr-auto-approve")
-    logger.info("Starting pr-auto-approve service (review mode)")
+    logger.info("*" * 20 + " pr-auto-approve (review) starting " + "*" * 20)
 
     # Acquire exclusive lock to prevent concurrent runs from exceeding approval_cap
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -551,19 +567,30 @@ def run_review(config_path: Path) -> None:
             logger.info("Another pr-auto-approve instance is running, exiting")
             return
         try:
-            _run_review_inner(config_path, logger)
+            stats = _run_review_inner(config_path, logger)
         finally:
             fcntl.flock(lock_fp, fcntl.LOCK_UN)
 
+    elapsed = time.monotonic() - t0
+    reviewed = stats.get("reviewed", 0) if stats else 0
+    approved = stats.get("approved", 0) if stats else 0
+    skipped = stats.get("skipped", 0) if stats else 0
+    logger.info(
+        f"{'*' * 20} completed: {reviewed} PRs reviewed, "
+        f"{approved} approved, {skipped} skipped, "
+        f"elapsed {elapsed / 60:.1f}m {'*' * 20}"
+    )
 
-def _run_review_inner(config_path: Path, logger: logging.Logger) -> None:
-    """Review flow after lock is acquired."""
+
+def _run_review_inner(config_path: Path, logger: logging.Logger) -> dict:
+    """Review flow after lock is acquired. Returns stats dict."""
+    stats = {"reviewed": 0, "approved": 0, "skipped": 0}
     try:
         config = load_config(config_path)
     except (FileNotFoundError, ValueError) as e:
         logger.error(f"Config error: {e}")
         send_telegram(f"pr-auto-approve FATAL: {e}")
-        return
+        return stats
 
     hostname = config.get("hostname", "")
     targets = config.get("targets", [])
@@ -583,7 +610,7 @@ def _run_review_inner(config_path: Path, logger: logging.Logger) -> None:
     has_gitlab = any(t.get("provider") == "gitlab" for t in targets)
     if has_gitlab and not start_glab_proxy(cli_wrappers, hostname, logger):
         send_telegram("pr-auto-approve FATAL: failed to start glab proxy", hostname=hostname)
-        return
+        return stats
 
     try:
         _run_review_loop(
@@ -599,6 +626,7 @@ def _run_review_inner(config_path: Path, logger: logging.Logger) -> None:
             llm_effort,
             reviews_file,
             warnings,
+            stats,
             logger,
         )
     finally:
@@ -609,6 +637,8 @@ def _run_review_inner(config_path: Path, logger: logging.Logger) -> None:
         warn_text = format_warnings(warnings)
         logger.warning(warn_text)
         send_telegram(f"pr-auto-approve: {warn_text}", hostname=hostname)
+
+    return stats
 
 
 def _run_review_loop(
@@ -624,6 +654,7 @@ def _run_review_loop(
     llm_effort: str,
     reviews_file: Path,
     warnings: list[str],
+    stats: dict,
     logger: logging.Logger,
 ) -> None:
     """Inner review loop — separated so the finally block in run_review can clean up."""
@@ -679,6 +710,7 @@ def _run_review_loop(
                 pr_number = pr["number"]
                 pr_title = pr["title"]
                 logger.info(f"Evaluating {repo}#{pr_number}: {pr_title}")
+                stats["reviewed"] += 1
 
                 if is_wip(pr_title):
                     logger.info(f"WIP in title: {repo}#{pr_number}, skipping")
@@ -771,18 +803,24 @@ def _run_review_loop(
                     action = "approved" if success else "approve-failed"
                     if success:
                         remaining -= 1
+                        stats["approved"] += 1
                     else:
                         warnings.append(f"Approval failed for {repo}#{pr_number}")
+                        stats["skipped"] += 1
                 else:
                     action = "skipped-ai"
+                    stats["skipped"] += 1
 
                 append_review(reviews_file, repo, pr_number, pr["author"], pr_title, reason, action)
 
 
 def run_day_summary(config_path: Path) -> None:
     """Day summary mode — read today's reviews and send telegram summary."""
+    import time
+
+    t0 = time.monotonic()
     logger, _log_file = setup_logging("pr-auto-approve")
-    logger.info("Starting pr-auto-approve service (day-summary mode)")
+    logger.info("*" * 20 + " pr-auto-approve (day-summary) starting " + "*" * 20)
 
     try:
         config = load_config(config_path)
@@ -803,13 +841,22 @@ def run_day_summary(config_path: Path) -> None:
             fcntl.flock(lock_fp, fcntl.LOCK_UN)
 
     summary = format_day_summary(entries)
-    logger.info(f"Day summary: {len(entries)} reviews")
+    approved = sum(1 for e in entries if e["action"] == "approved")
+    skipped = len(entries) - approved
+    logger.info(f"Day summary: {len(entries)} reviews, {approved} approved, {skipped} skipped")
 
     # Build title header
-    date_str = datetime.now(UTC).strftime("%B %-d, %Y")
-    header = f"\\[{hostname}] *PR Auto-Approve* ({date_str})" if hostname else f"*PR Auto-Approve* ({date_str})"
+    date_str = datetime.now().strftime("%B %-d, %Y")
+    header = f"\\[{hostname}] *PR Auto-Approve — Daily Summary* ({date_str})" if hostname else f"*PR Auto-Approve — Daily Summary* ({date_str})"
     full_message = header + "\n\n" + summary
     send_telegram(full_message)
+
+    elapsed = time.monotonic() - t0
+    logger.info(
+        f"{'*' * 20} completed: {len(entries)} reviews, "
+        f"{approved} approved, {skipped} skipped, "
+        f"elapsed {elapsed / 60:.1f}m {'*' * 20}"
+    )
 
 
 def main() -> None:
@@ -1239,11 +1286,13 @@ if __name__ == "__main__":
                     },
                 ]
                 result = format_day_summary(entries)
-                self.assertIn("3 reviews", result)
-                self.assertIn("org/repo1:", result)
-                self.assertIn("org/repo2:", result)
-                self.assertIn("#1 (alice)", result)
-                self.assertIn("#5 (carol)", result)
+                self.assertIn("2 ✅ approved", result)
+                self.assertIn("1 ❌ skipped", result)
+                self.assertIn("*org/repo1*", result)
+                self.assertIn("*org/repo2*", result)
+                self.assertIn("✅ [#1 / @alice]", result)
+                self.assertIn("❌ [#2 / @bob]", result)
+                self.assertIn("✅ [#5 / @carol]", result)
 
         class TestBuildReviewPrompt(unittest.TestCase):
             def test_includes_title_and_diff(self):
@@ -1450,8 +1499,8 @@ if __name__ == "__main__":
                 mock_tg.assert_called()
                 sent = mock_tg.call_args[0][0]
                 self.assertIn("PR Auto-Approve", sent)
-                self.assertIn("1 reviews", sent)
-                self.assertIn("org/repo", sent)
+                self.assertIn("1 ✅ approved", sent)
+                self.assertIn("*org/repo*", sent)
 
                 import shutil
 

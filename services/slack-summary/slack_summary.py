@@ -15,6 +15,7 @@ Config (config.yaml):
 
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -31,6 +32,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "common" / "helpers
 from ai import AIError, call_ai
 from log import setup_logging
 from telegram import send_telegram
+
+# Allow slackdump to read unencrypted credentials (needed for non-interactive/cron use)
+os.environ.setdefault("DISABLE_ENCRYPTION", "1")
 
 DUMP_DIR_PREFIX = "slack-summary-"
 AUTH_TEST_DIR_PREFIX = "slack-auth-test-"
@@ -436,8 +440,11 @@ def format_warnings(warnings: list[str]) -> str:
 
 def run_summary(config_path: Path) -> None:
     """Main summary execution flow."""
+    import time
+
+    t0 = time.monotonic()
     logger, log_file = setup_logging("slack-summary")
-    logger.info("Starting slack-summary service")
+    logger.info("*" * 20 + " slack-summary starting " + "*" * 20)
 
     # Load config
     try:
@@ -504,11 +511,25 @@ def run_summary(config_path: Path) -> None:
                 }
             )
 
+        # Build title header
+        from datetime import datetime
+
+        date_str = datetime.now().strftime("%B %-d, %Y")
+        title_date = f"{date_str} | Δ{timeframe}"
+        header = f"\\[{hostname}] *Slack Summary* ({title_date})" if hostname else f"*Slack Summary* ({title_date})"
+
+        total_messages = sum(len(cd["messages"]) for cd in channels_data)
+
         if not channels_data:
             logger.info("No messages found in any channel")
-            msg = "slack-summary: no messages found in the configured timeframe"
+            msg = header + "\n\nNo messages found in the configured timeframe."
             msg += format_warnings(warnings)
-            send_telegram(msg, hostname=hostname)
+            send_telegram(msg)
+            elapsed = time.monotonic() - t0
+            logger.info(
+                f"{'*' * 20} completed: {len(channels)} channels, 0 messages, "
+                f"elapsed {elapsed / 60:.1f}m {'*' * 20}"
+            )
             return
 
         # Resolve user IDs
@@ -530,12 +551,6 @@ def run_summary(config_path: Path) -> None:
             send_telegram(f"slack-summary FATAL: AI call failed: {e}", hostname=hostname)
             return
 
-        # Build title header
-        from datetime import UTC, datetime
-
-        date_str = datetime.now(UTC).strftime("%B %-d, %Y")
-        header = f"\\[{hostname}] *Slack Summary* ({date_str})" if hostname else f"*Slack Summary* ({date_str})"
-
         # Truncate AI text to fit within limit, preserving header and warnings
         warning_text = format_warnings(warnings)
         fixed_len = len(header) + len("\n\n") + len(warning_text)
@@ -556,7 +571,11 @@ def run_summary(config_path: Path) -> None:
         else:
             logger.warning("Slack summary telegram delivery failed")
 
-        logger.info("slack-summary service finished")
+        elapsed = time.monotonic() - t0
+        logger.info(
+            f"{'*' * 20} completed: {len(channels)} channels, {total_messages} messages, "
+            f"elapsed {elapsed / 60:.1f}m {'*' * 20}"
+        )
     finally:
         shutil.rmtree(dump_dir, ignore_errors=True)
 

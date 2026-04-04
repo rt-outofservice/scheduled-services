@@ -2,24 +2,29 @@
 
 Standalone Python scripts replacing Claude Code plugin skills. Business logic is algorithmic; AI (`claude -p`) is invoked only when genuinely needed (content analysis, summarization, code review).
 
-Deployed via [umputun/spot](https://github.com/umputun/spot) to `~/.scheduled-services` with cron-only scheduling.
+Deployed via [umputun/spot](https://github.com/umputun/spot) to `~/.scheduled-services`. Scheduling uses cron (Linux) or launchd (macOS) depending on the service platform.
 
 ## Services
 
-| Service | Description | Key dependencies |
-|---------|-------------|-----------------|
-| **news-digest** | Fetches RSS/Atom feeds, deduplicates articles, uses AI to generate per-group digests, sends via Telegram | `claude` |
-| **pr-auto-approve** | Discovers open PRs/MRs across GitHub/GitLab orgs, applies complexity gates, uses AI for safety review, auto-approves infra changes | `claude`, `gh`, `glab` (if GitLab targets) |
-| **slack-summary** | Dumps Slack channels via slackdump, resolves users, uses AI to summarize discussions, sends via Telegram | `claude`, `slackdump` |
-| **teams-summary** | Reads pre-existing MS Teams JSON message dumps, summarizes conversations per channel via AI, sends via Telegram. Supports keyword monitoring mode with contextual alerts | `claude` |
+| Service | Platform | Description | Key dependencies |
+|---------|----------|-------------|-----------------|
+| **news-digest** | Linux | Fetches RSS/Atom feeds, deduplicates articles, uses AI to generate per-group digests, sends via Telegram | `claude` |
+| **pr-auto-approve** | macOS | Discovers open PRs/MRs across GitHub/GitLab orgs, applies complexity gates, uses AI for safety review, auto-approves infra changes | `claude`, `gh`, `glab` (if GitLab targets) |
+| **slack-summary** | macOS | Dumps Slack channels via slackdump, resolves users, uses AI to summarize discussions, sends via Telegram | `claude`, `slackdump` |
+| **teams-summary** | macOS | Reads pre-existing MS Teams JSON message dumps, summarizes conversations per channel via AI, sends via Telegram. Supports keyword monitoring mode with contextual alerts | `claude` |
 
 ## Directory Structure
 
 ```
 common/helpers/          Shared Python modules (logging, telegram, ai)
 services/<name>/         Each service: main script, config.yaml, .bindeps
-scripts/                 Utility scripts (migration, etc.)
+scripts/                 Deployment & utility scripts
+  install_launchd.py     LaunchAgent plist generation and installation (macOS)
+  install_crontab.py     Managed crontab block installation (Linux)
+  write_configs.py       Service config.yaml generation from env vars
+  migrate.sh             Migration from old Claude Code plugins
 docs/plans/              Implementation plans
+templates/               LaunchAgent plist template (macOS scheduling)
 playbook.main.yaml       Spot deployment playbook
 env.example-main.yml     Environment variable template
 env.<host>-main.yml      Per-host configuration (not committed — see below)
@@ -29,10 +34,28 @@ env.<host>-main.yml      Per-host configuration (not committed — see below)
 
 Each target machine gets its own env file: `env.<host>-main.yml`. These files define which services are enabled and their full configuration. The file format follows [spot](https://github.com/umputun/spot) conventions.
 
-Each service has three env vars:
+Each service has these env vars:
 - `<PREFIX>_ENABLED` — `"true"` or `"false"`
 - `<PREFIX>_SERVICE_CONFIG` — raw YAML written verbatim to `config.yaml`
-- `<PREFIX>_CRON_SCHEDULE` — raw crontab entries (multiple lines supported)
+- `<PREFIX>_CRON_SCHEDULE` — raw crontab entries (Linux services only)
+- `<PREFIX>_LAUNCHD_SCHEDULE` — YAML schedule definition (macOS services only)
+
+### Scheduling
+
+**Linux services** use standard crontab entries via `_CRON_SCHEDULE`.
+
+**macOS services** use launchd via `_LAUNCHD_SCHEDULE`. The schedule is defined in YAML as a list of jobs, each with a command and StartCalendarInterval entries:
+
+```yaml
+- command: "cd ~/.scheduled-services && uv run python services/slack-summary/slack_summary.py"
+  schedule:
+    - {Minute: 30, Hour: 6, Weekday: [1,2,3,4,5]}
+    - {Minute: 0, Hour: 18, Weekday: [1,2,3,4,5]}
+```
+
+Array values are expanded (e.g. `Weekday: [1,2,3,4,5]` creates one entry per weekday). Omit a field to mean "every" (same as `*` in cron). Services with multiple commands (e.g. pr-auto-approve with its day summary) define multiple jobs in the list, each becoming its own LaunchAgent.
+
+macOS services use launchd instead of cron because launchd agents run in the user's login session, providing access to the macOS Keychain (required for `claude` auth and Telegram credentials).
 
 See `env.example-main.yml` for the full schema and examples.
 
@@ -54,7 +77,6 @@ See `env.example-main.yml` for the full schema and examples.
 | [spot](https://github.com/umputun/spot) | Deployment (runs on your local machine, not on targets) |
 | [uv](https://docs.astral.sh/uv/) | Python package manager / runner |
 | `python3 >= 3.11` | Runtime |
-| `yq` | YAML validation during deploy |
 | `rsync` | File sync during deploy |
 
 ### Per-service
@@ -103,11 +125,13 @@ The same pattern applies to `gh` if needed in the future.
    ```
 
 The playbook will:
+- Check platform requirements (fail early if a service targets the wrong OS)
 - Validate all required binary dependencies (global + per-service `.bindeps`)
 - Sync project files to `~/.scheduled-services/`
 - Set up the Python virtualenv via `uv sync`
 - Write each enabled service's `config.yaml` from the env file
-- Install crontab entries under tagged blocks (`# BEGIN/END managed:scheduled-<service>`)
+- Install crontab entries for Linux services (`# BEGIN/END managed:scheduled-<service>`)
+- Install LaunchAgent plists for macOS services (`~/Library/LaunchAgents/com.scheduled-services.<name>.plist`)
 - Send a Telegram notification on completion
 
 ## Adding a New Service
@@ -126,8 +150,8 @@ The playbook will:
    - Use `setup_logging(service_name)` for daily log files
    - Use `send_telegram()` for notifications
    - Never fail silently: fatal errors are logged AND sent via Telegram
-4. Add the service to `env.example-main.yml` with `SERVICE_CONFIG`, `CRON_SCHEDULE`, and enable flag
-5. Add the service to the `playbook.main.yaml` config generation and crontab sections
+4. Add the service to `env.example-main.yml` with `SERVICE_CONFIG`, schedule (`CRON_SCHEDULE` for Linux or `LAUNCHD_SCHEDULE` for macOS), and enable flag
+5. Register the service in `playbook.main.yaml`: add its `svc:PREFIX` pair to the platform check, config generation, and scheduling task arguments. The deployment scripts (`scripts/write_configs.py`, `scripts/install_crontab.py`, `scripts/install_launchd.py`) handle the rest automatically
 
 ## Running Tests Locally
 
@@ -146,6 +170,9 @@ uv run python services/news-digest/news_digest.py --tests
 uv run python services/slack-summary/slack_summary.py --tests
 uv run python services/pr-auto-approve/pr_auto_approve.py --tests
 uv run python services/teams-summary/teams_summary.py --tests
+uv run python scripts/install_launchd.py --tests
+uv run python scripts/install_crontab.py --tests
+uv run python scripts/write_configs.py --tests
 
 # Lint and format
 uv run ruff check .

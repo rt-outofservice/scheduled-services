@@ -7,7 +7,14 @@
 # Environment variables per service (defined in env file):
 #   <PREFIX>_ENABLED: "true"/"false"       - enable deployment
 #   <PREFIX>_SERVICE_CONFIG: |             - raw YAML for config.yaml
-#   <PREFIX>_CRON_SCHEDULE: |              - raw crontab entries
+#   <PREFIX>_CRON_SCHEDULE: |              - raw crontab entries (linux services)
+#   <PREFIX>_LAUNCHD_SCHEDULE: |           - launchd schedule entries (macOS services)
+#
+# Platform requirements:
+#   news-digest      — Linux only  (cron)
+#   pr-auto-approve  — macOS only  (launchd)
+#   slack-summary    — macOS only  (launchd)
+#   teams-summary    — macOS only  (launchd)
 #
 # Services: news-digest (NEWS_DIGEST), slack-summary (SLACK_SUMMARY),
 #           pr-auto-approve (PR_AUTO_APPROVE), teams-summary (TEAMS_SUMMARY)
@@ -39,10 +46,26 @@ tasks:
           echo "Deploy version: $version"
         options: {local: true}
 
-  # ── Validate Dependencies ──────────────────────────────────
-  - name: validate-deps
+  # ── Platform Checks ────────────────────────────────────────
+  - name: platform-checks
     on_error: &on_error |
       /bin/bash -c 'source ~/.bash.d/telegram.bash 2>/dev/null || source ~/.zsh.d/telegram.zsh 2>/dev/null; tg "⛔ *{SPOT_REMOTE_NAME}* — _scheduled-services_ failed at {SPOT_TASK}"' || true
+    commands:
+      - name: check-platform-requirements
+        script: |
+          os=$(uname -s)
+          errors=()
+          for entry in news-digest:NEWS_DIGEST:Linux pr-auto-approve:PR_AUTO_APPROVE:Darwin slack-summary:SLACK_SUMMARY:Darwin teams-summary:TEAMS_SUMMARY:Darwin; do
+            svc="${entry%%:*}"; rest="${entry#*:}"; prefix="${rest%%:*}"; required="${rest##*:}"
+            ev="${prefix}_ENABLED"
+            [[ "${!ev:-false}" == "true" && "$os" != "$required" ]] && errors+=("$svc requires $required but target is $os")
+          done
+          [[ ${#errors[@]} -gt 0 ]] && printf 'ERROR: %s\n' "${errors[@]}" >&2 && exit 1
+          echo "Platform checks passed ($os)"
+
+  # ── Validate Dependencies ──────────────────────────────────
+  - name: validate-deps
+    on_error: *on_error
     commands:
       - name: copy-bindeps
         copy:
@@ -56,31 +79,15 @@ tasks:
         script: |
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           missing=()
-          for tool in uv yq python3 rsync claude codex; do
-            command -v "$tool" &>/dev/null || missing+=("$tool")
-          done
-
+          for tool in uv python3 rsync claude codex; do command -v "$tool" &>/dev/null || missing+=("$tool"); done
           for svc in news-digest slack-summary pr-auto-approve teams-summary; do
-            prefix=$(echo "$svc" | tr '[:lower:]-' '[:upper:]_')
-            enabled_var="${prefix}_ENABLED"
-            if [[ "${!enabled_var:-false}" == "true" ]]; then
-              bindeps="/tmp/.bindeps-${svc}"
-              if [[ -f "$bindeps" ]]; then
-                while IFS= read -r dep || [[ -n "$dep" ]]; do
-                  dep=$(echo "$dep" | xargs)
-                  [[ -z "$dep" || "$dep" == \#* ]] && continue
-                  command -v "$dep" &>/dev/null || missing+=("$dep (required by $svc)")
-                done < "$bindeps"
-              fi
-            fi
+            prefix=$(echo "$svc" | tr '[:lower:]-' '[:upper:]_'); ev="${prefix}_ENABLED"
+            [[ "${!ev:-false}" != "true" || ! -f "/tmp/.bindeps-${svc}" ]] && continue
+            while IFS= read -r dep || [[ -n "$dep" ]]; do dep="${dep## }"; dep="${dep%% }"
+              [[ -n "$dep" && "$dep" != \#* ]] && ! command -v "$dep" &>/dev/null && missing+=("$dep ($svc)")
+            done < "/tmp/.bindeps-${svc}"
           done
-
-          if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "ERROR: missing required tools:" >&2
-            printf '  - %s\n' "${missing[@]}" >&2
-            exit 1
-          fi
-          echo "All required tools present"
+          [[ ${#missing[@]} -eq 0 ]] && echo "All required tools present" || { printf 'ERROR: missing %s\n' "${missing[@]}" >&2; exit 1; }
 
   # ── Deploy Files ───────────────────────────────────────────
   - name: deploy-files
@@ -91,7 +98,7 @@ tasks:
           src: "."
           dst: "/tmp/.sched-svc-deploy/"
           exclude: ["__pycache__", ".venv", ".git", ".ruff_cache", ".ralphex",
-                    "docs", "scripts", ".pre-commit-config.yaml",
+                    "docs", "scripts/migrate.sh", ".pre-commit-config.yaml",
                     "CLAUDE.md", "README.md", "env.*", "playbook.*"]
         on_exit: "rm -rf /tmp/.sched-svc-deploy/"
 
@@ -100,14 +107,9 @@ tasks:
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           mkdir -p ~/.scheduled-services
           rsync -a --delete \
-            --exclude '__pycache__' \
-            --exclude '*.pyc' \
-            --exclude 'config.yaml' \
-            --exclude '.version' \
-            --exclude '.lock' \
-            --exclude 'reviews.md' \
-            --exclude 'user-cache.txt' \
-            --exclude '.venv' \
+            --exclude='__pycache__' --exclude='*.pyc' --exclude='config.yaml' \
+            --exclude='.version' --exclude='.lock' --exclude='reviews.md' \
+            --exclude='user-cache.txt' --exclude='.venv' \
             /tmp/.sched-svc-deploy/ ~/.scheduled-services/
 
       - name: deploy-version
@@ -137,126 +139,39 @@ tasks:
       - name: write-service-configs
         script: |
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
-          write_config() {
-            local svc="$1" prefix="$2"
-            local config_var="${prefix}_SERVICE_CONFIG"
-            local config_content="${!config_var:-}"
-            local config_path="$HOME/.scheduled-services/services/$svc/config.yaml"
+          cd ~/.scheduled-services && uv run python scripts/write_configs.py \
+            --base-dir ~/.scheduled-services \
+            news-digest:NEWS_DIGEST slack-summary:SLACK_SUMMARY \
+            pr-auto-approve:PR_AUTO_APPROVE teams-summary:TEAMS_SUMMARY
 
-            if [[ -z "$config_content" ]]; then
-              echo "$svc: no SERVICE_CONFIG — skipping"
-              return 0
-            fi
-
-            mkdir -p "$(dirname "$config_path")"
-            printf '%b\n' "$config_content" > "$config_path"
-            chmod 600 "$config_path"
-
-            if ! yq '.' "$config_path" > /dev/null 2>&1; then
-              echo "ERROR: $svc config.yaml is not valid YAML" >&2
-              yq '.' "$config_path" >&2
-              rm -f "$config_path"
-              exit 1
-            fi
-
-            echo "$svc: config.yaml written and validated"
-          }
-
-          [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && write_config "news-digest" "NEWS_DIGEST"
-          [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && write_config "slack-summary" "SLACK_SUMMARY"
-          [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && write_config "pr-auto-approve" "PR_AUTO_APPROVE"
-          [[ "${TEAMS_SUMMARY_ENABLED:-false}" == "true" ]] && write_config "teams-summary" "TEAMS_SUMMARY"
-          echo "Config generation complete"
-
-  # ── Configure Crontab ─────────────────────────────────────
+  # ── Configure Scheduling ──────────────────────────────────
+  #
+  # Linux services (news-digest): crontab entries
+  # macOS services (pr-auto-approve, slack-summary, teams-summary): launchd plists
+  #
   - name: configure-crontab
     on_error: *on_error
     commands:
       - name: update-crontab
         script: |
+          [[ "$(uname -s)" != "Linux" ]] && echo "Skipping crontab (not Linux)" && exit 0
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
-          current=$(crontab -l 2>/dev/null || true)
+          cd ~/.scheduled-services && uv run python scripts/install_crontab.py \
+            news-digest:NEWS_DIGEST
 
-          # Remove all managed:scheduled-* tagged blocks
-          cleaned=$(printf '%s\n' "$current" | awk '
-            /^# BEGIN managed:scheduled-/ { skip=1; next }
-            /^# END managed:scheduled-/   { skip=0; next }
-            !skip { print }
-          ')
-
-          new_entries=""
-          add_schedule() {
-            local svc="$1" prefix="$2"
-            local cron_var="${prefix}_CRON_SCHEDULE"
-            local cron_content
-            cron_content=$(printf '%b' "${!cron_var:-}")
-            local enabled_var="${prefix}_ENABLED"
-
-            if [[ "${!enabled_var:-false}" != "true" || -z "$cron_content" ]]; then
-              return 0
-            fi
-
-            new_entries+="# BEGIN managed:scheduled-${svc}"$'\n'
-            new_entries+="PATH=\$HOME/.local/bin:\$HOME/.bin:/opt/homebrew/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin"$'\n'
-            while IFS= read -r line || [[ -n "$line" ]]; do
-              [[ -z "$line" ]] && continue
-              new_entries+="${line}"$'\n'
-            done <<< "$cron_content"
-            new_entries+="# END managed:scheduled-${svc}"$'\n'
-            echo "$svc: cron schedule added"
-          }
-
-          add_schedule "news-digest" "NEWS_DIGEST"
-          add_schedule "slack-summary" "SLACK_SUMMARY"
-          add_schedule "pr-auto-approve" "PR_AUTO_APPROVE"
-          add_schedule "teams-summary" "TEAMS_SUMMARY"
-
-          # Combine: cleaned existing + new managed entries
-          final="$cleaned"
-          if [[ -n "$new_entries" ]]; then
-            [[ -n "$final" ]] && final="${final}"$'\n'
-            final="${final}${new_entries}"
-          fi
-
-          # Trim trailing blank lines (compatible with both GNU and BSD sed)
-          while [[ "$final" == *$'\n' ]]; do
-            final="${final%$'\n'}"
-          done
-
-          # Validate cron syntax (try crontab -n, then -T, then regex fallback)
-          cron_validated=false
-          for flag in -n -T; do
-            validation_output=$(printf '%s\n' "$final" | crontab "$flag" - 2>&1) && rc=0 || rc=$?
-            if [[ $rc -eq 0 ]]; then
-              echo "Crontab validated (crontab $flag)"
-              cron_validated=true
-              break
-            fi
-            # If the flag itself is unsupported, try next
-            if echo "$validation_output" | grep -qi "invalid option\|unknown option\|unrecognized option\|illegal option"; then
-              continue
-            fi
-            # Flag is supported but syntax failed
-            echo "ERROR: crontab syntax validation failed: $validation_output" >&2
-            exit 1
-          done
-          if ! $cron_validated; then
-            # Neither -n nor -T available — regex fallback
-            while IFS= read -r line; do
-              [[ "$line" == \#* || -z "$line" ]] && continue
-              before_space="${line%% *}"
-              [[ "$before_space" == *=* ]] && continue
-              if ! echo "$line" | grep -qE '^[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+[0-9*/,-]+[[:space:]]+'; then
-                echo "ERROR: invalid cron syntax: $line" >&2
-                exit 1
-              fi
-            done <<< "$final"
-            echo "Crontab validated (regex)"
-          fi
-
-          # Install new crontab
-          printf '%s\n' "$final" | crontab -
-          echo "Crontab updated"
+  - name: configure-launchd
+    on_error: *on_error
+    commands:
+      - name: install-launchd-agents
+        script: |
+          [[ "$(uname -s)" != "Darwin" ]] && echo "Skipping launchd (not macOS)" && exit 0
+          export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
+          cd ~/.scheduled-services && uv run python scripts/install_launchd.py \
+            --template templates/launchd.plist.tpl \
+            --agents-dir "$HOME/Library/LaunchAgents" \
+            --prefix-tag com.scheduled-services \
+            slack-summary:SLACK_SUMMARY pr-auto-approve:PR_AUTO_APPROVE \
+            teams-summary:TEAMS_SUMMARY
 
   # ── Completion Notification ────────────────────────────────
   - name: notify-completion
@@ -264,21 +179,13 @@ tasks:
       - name: send-completion-notification
         script: |
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
-          tg_loaded=false
-          for f in ~/.bash.d/telegram.bash ~/.zsh.d/telegram.zsh; do
-            [ -f "$f" ] && . "$f" && tg_loaded=true && break
+          for f in ~/.bash.d/telegram.bash ~/.zsh.d/telegram.zsh; do [ -f "$f" ] && . "$f" && tg_loaded=true && break; done
+          ${tg_loaded:-false} || exit 0
+          name="{SPOT_REMOTE_NAME}"; [ -z "$name" ] && name=$(hostname -s)
+          ver=$(cat ~/.scheduled-services/.version 2>/dev/null || echo "unknown")
+          enabled=""
+          for sp in NEWS_DIGEST:news-digest SLACK_SUMMARY:slack-summary PR_AUTO_APPROVE:pr-auto-approve TEAMS_SUMMARY:teams-summary; do
+            ev="${sp%%:*}_ENABLED"; svc="${sp##*:}"; [[ "${!ev:-false}" == "true" ]] && enabled="$enabled$svc "
           done
-          if $tg_loaded; then
-            name="{SPOT_REMOTE_NAME}"
-            [ -z "$name" ] && name=$(hostname -s)
-            ver=$(cat ~/.scheduled-services/.version 2>/dev/null || echo "unknown")
-
-            enabled=""
-            [[ "${NEWS_DIGEST_ENABLED:-false}" == "true" ]] && enabled="${enabled}news-digest "
-            [[ "${SLACK_SUMMARY_ENABLED:-false}" == "true" ]] && enabled="${enabled}slack-summary "
-            [[ "${PR_AUTO_APPROVE_ENABLED:-false}" == "true" ]] && enabled="${enabled}pr-auto-approve "
-            [[ "${TEAMS_SUMMARY_ENABLED:-false}" == "true" ]] && enabled="${enabled}teams-summary "
-            enabled="${enabled% }"
-
-            tg "✅ *${name}* — _scheduled-services_ deployed (${ver}): ${enabled:-none}" || true
-          fi
+          enabled="${enabled% }"
+          tg "✅ *${name}* — _scheduled-services_ deployed (${ver}): ${enabled:-none}" || true

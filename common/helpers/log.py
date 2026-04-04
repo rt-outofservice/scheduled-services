@@ -3,7 +3,7 @@
 import logging
 import os
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 
@@ -18,7 +18,7 @@ def setup_logging(service_name: str) -> tuple[logging.Logger, Path]:
     log_dir = Path.home() / ".logs" / "scheduled-services" / service_name
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    today = datetime.now(UTC).strftime("%m-%d-%Y")
+    today = datetime.now().strftime("%m-%d-%Y")
     log_file = log_dir / f"{service_name}_{today}.log"
 
     logger = logging.getLogger(f"scheduled-services.{service_name}")
@@ -83,7 +83,7 @@ if __name__ == "__main__":
                 logger, log_file = setup_logging("test-svc")
                 self.assertTrue(log_file.exists())
                 self.assertIn("test-svc", log_file.name)
-                self.assertIn(datetime.now(UTC).strftime("%m-%d-%Y"), log_file.name)
+                self.assertIn(datetime.now().strftime("%m-%d-%Y"), log_file.name)
                 # Restore for assertions
                 sys.stdout = _real_stdout
                 sys.stderr = _real_stderr
