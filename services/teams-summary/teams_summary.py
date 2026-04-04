@@ -38,7 +38,7 @@ from telegram import send_telegram  # noqa: E402
 
 ET = ZoneInfo("America/New_York")
 
-FILENAME_RE = re.compile(r"^(.+?)_(\d+)mins_(\d{4}-\d{2}-\d{2}-\d{4})\.json$")
+FILENAME_RE = re.compile(r"^(.+)_(\d+)mins_(\d{4}-\d{2}-\d{2})[_-](\d{4})\.json$")
 DATE_FOLDER_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -53,7 +53,8 @@ class FileInfo:
 def parse_filename(filename: str, file_path: Path) -> FileInfo | None:
     """Parse a Teams JSON dump filename into a FileInfo.
 
-    Filename format: <chat_name>_<lookback>mins_<yyyy-mm-dd-HHMM>.json
+    Filename format: <chat_name>_<lookback>mins_<yyyy-mm-dd>_<HHMM>.json
+    (date-time separator can be _ or -)
     Returns None for non-matching filenames.
     """
     m = FILENAME_RE.match(filename)
@@ -61,7 +62,7 @@ def parse_filename(filename: str, file_path: Path) -> FileInfo | None:
         return None
     chat_name = m.group(1)
     lookback_mins = int(m.group(2))
-    dt_str = m.group(3)
+    dt_str = f"{m.group(3)}-{m.group(4)}"
     try:
         file_dt = datetime.strptime(dt_str, "%Y-%m-%d-%H%M").replace(tzinfo=ET)
     except ValueError:
