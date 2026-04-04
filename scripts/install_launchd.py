@@ -177,6 +177,9 @@ def install_service(svc, prefix, template, prefix_tag, agents_dir):
         print(f"{svc}: no LAUNCHD_SCHEDULE — skipping")
         return
 
+    # Spot passes multiline env vars with \n escape sequences — decode them
+    schedule_raw = schedule_raw.replace("\\n", "\n").replace("\\t", "\t")
+
     try:
         jobs = yaml.safe_load(schedule_raw)
     except yaml.YAMLError as e:

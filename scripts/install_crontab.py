@@ -158,6 +158,8 @@ def update_crontab(services):
         cron_content = os.environ.get(f"{prefix}_CRON_SCHEDULE", "")
         if not cron_content:
             continue
+        # Spot passes multiline env vars with \n escape sequences — decode them
+        cron_content = cron_content.replace("\\n", "\n").replace("\\t", "\t")
         block = build_managed_block(svc, cron_content)
         new_blocks.append(block)
         print(f"{svc}: cron schedule added")

@@ -39,8 +39,8 @@ def write_config(svc, prefix, base_dir):
         print(f"{svc}: no SERVICE_CONFIG — skipping")
         return False
 
-    # Validate YAML before writing
-    decoded = config_content
+    # Spot passes multiline env vars with \n escape sequences — decode them
+    decoded = config_content.replace("\\n", "\n").replace("\\t", "\t")
     try:
         yaml.safe_load(decoded)
     except yaml.YAMLError as e:
