@@ -153,6 +153,7 @@ tasks:
     commands:
       - name: update-crontab
         script: |
+          [[ "$(uname -s)" != "Linux" ]] && echo "Skipping crontab (not Linux)" && exit 0
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           cd ~/.scheduled-services && uv run python scripts/install_crontab.py \
             news-digest:NEWS_DIGEST
@@ -162,6 +163,7 @@ tasks:
     commands:
       - name: install-launchd-agents
         script: |
+          [[ "$(uname -s)" != "Darwin" ]] && echo "Skipping launchd (not macOS)" && exit 0
           export PATH="$HOME/.local/bin:$HOME/.bin:/opt/homebrew/bin:/snap/bin:$PATH"
           cd ~/.scheduled-services && uv run python scripts/install_launchd.py \
             --template templates/launchd.plist.tpl \
