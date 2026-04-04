@@ -12,7 +12,6 @@ scripts/              - Deployment & utility scripts
   install_launchd.py  - LaunchAgent plist generation/installation (macOS)
   install_crontab.py  - Managed crontab block installation (Linux)
   write_configs.py    - Service config.yaml generation from env vars
-  migrate.sh          - Migration from old Claude Code plugins
 docs/plans/           - Implementation plans
 playbook.main.yaml    - Spot deployment playbook
 inventory.yml         - Host inventory for spot

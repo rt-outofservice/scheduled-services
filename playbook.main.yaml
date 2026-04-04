@@ -98,7 +98,7 @@ tasks:
           src: "."
           dst: "/tmp/.sched-svc-deploy/"
           exclude: ["__pycache__", ".venv", ".git", ".ruff_cache", ".ralphex",
-                    "docs", "scripts/migrate.sh", ".pre-commit-config.yaml",
+                    "docs", ".pre-commit-config.yaml",
                     "CLAUDE.md", "README.md", "env.*", "playbook.*"]
         on_exit: "rm -rf /tmp/.sched-svc-deploy/"
 

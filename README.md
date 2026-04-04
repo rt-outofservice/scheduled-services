@@ -22,7 +22,6 @@ scripts/                 Deployment & utility scripts
   install_launchd.py     LaunchAgent plist generation and installation (macOS)
   install_crontab.py     Managed crontab block installation (Linux)
   write_configs.py       Service config.yaml generation from env vars
-  migrate.sh             Migration from old Claude Code plugins
 docs/plans/              Implementation plans
 templates/               LaunchAgent plist template (macOS scheduling)
 playbook.main.yaml       Spot deployment playbook
@@ -64,7 +63,7 @@ See `env.example-main.yml` for the full schema and examples.
 | Host | Enabled services | Notes |
 |------|-----------------|-------|
 | saturn | news-digest | Personal feeds (politics, tech, sports, FL news) |
-| angry-lobster | pr-auto-approve | GitHub — CorelCorp2-new (filtered repos) |
+| angry-lobster | pr-auto-approve, teams-summary | GitHub — CorelCorp2-new; Teams channel summaries + keyword monitoring |
 | polite-wombat | slack-summary | Pango Slack channels |
 | speedy-elk | slack-summary | Flywire Slack channels |
 
@@ -182,18 +181,4 @@ uv run ruff format --check .
 pre-commit run --all-files
 ```
 
-## Migration from Claude Code Plugins
 
-If you previously used the Claude Code plugin-based system:
-
-```bash
-bash scripts/migrate.sh
-```
-
-This idempotently removes:
-- Old crontab entries tagged `managed:claude-*`
-- macOS LaunchAgents matching `com.user.claude-*.plist`
-- Old skills-wrapper at `~/.bin/claude-skills-wrapper/`
-- Old Claude Code plugins (digest, git, summary)
-
-Safe to run multiple times.
