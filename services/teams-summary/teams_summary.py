@@ -13,7 +13,7 @@ Config (config.yaml):
     channels:
       - general
       - engineering
-    min_file_size: 500
+    ignore_files_smaller_than_bytes: 500
     llm_provider: claude
     llm_model: haiku
     llm_model_effort: ""
@@ -79,7 +79,7 @@ def discover_files(
     data_dir: str,
     window_start: datetime,
     window_end: datetime,
-    min_file_size: int,
+    ignore_files_smaller_than_bytes: int,
     logger: logging.Logger,
 ) -> tuple[list[FileInfo], list[str]]:
     """Discover Teams JSON dumps that overlap with the requested time window.
@@ -128,7 +128,7 @@ def discover_files(
                 logger.warning(msg)
                 scan_warnings.append(msg)
                 continue
-            if file_size < min_file_size:
+            if file_size < ignore_files_smaller_than_bytes:
                 logger.debug(f"Skipping small file: {json_file} ({file_size} bytes)")
                 continue
             info = parse_filename(json_file.name, json_file)
@@ -204,12 +204,13 @@ def _is_valid_bool_value(value: object) -> bool:
     return isinstance(value, int) and value in (0, 1)
 
 
-def _build_header(hostname: str, title: str, window_end: datetime) -> str:
-    """Build Telegram message header with optional hostname prefix."""
+def _build_header(hostname: str, title: str, window_end: datetime, timeframe: str = "") -> str:
+    """Build Telegram message header with optional hostname prefix and delta."""
     date_str = window_end.strftime("%B %-d, %Y")
+    title_date = f"{date_str} | Δ{timeframe}" if timeframe else date_str
     if hostname:
-        return f"\\[{_escape_md(hostname)}] *{title}* ({date_str})"
-    return f"*{title}* ({date_str})"
+        return f"\\[{_escape_md(hostname)}] *{title}* ({title_date})"
+    return f"*{title}* ({title_date})"
 
 
 def read_and_summarize_channel(
@@ -291,16 +292,16 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
         send_telegram(f"teams-summary FATAL: {_escape_md(str(e))}", hostname=hostname)
         return
 
-    min_file_size = config.get("min_file_size", 500)
+    ignore_files_smaller_than_bytes = config.get("ignore_files_smaller_than_bytes", 500)
     try:
-        files, scan_warnings = discover_files(config["data_dir"], window_start, window_end, min_file_size, logger)
+        files, scan_warnings = discover_files(config["data_dir"], window_start, window_end, ignore_files_smaller_than_bytes, logger)
     except OSError as e:
         logger.error(f"Data directory error: {e}")
         send_telegram(f"teams-summary FATAL: {_escape_md(str(e))}", hostname=hostname)
         return
 
     if not files:
-        header = _build_header(hostname, "Teams Summary", window_end)
+        header = _build_header(hostname, "Teams Summary", window_end, timeframe)
         if scan_warnings:
             logger.error(f"No files found with scan errors: {'; '.join(scan_warnings)}")
             escaped = "; ".join(_escape_md(w) for w in scan_warnings)
@@ -315,7 +316,7 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
     grouped = group_by_channel(files, channels_filter)
 
     if not grouped:
-        header = _build_header(hostname, "Teams Summary", window_end)
+        header = _build_header(hostname, "Teams Summary", window_end, timeframe)
         if scan_warnings:
             logger.error(f"No channels matched but scan had warnings: {'; '.join(scan_warnings)}")
             escaped = "; ".join(_escape_md(w) for w in scan_warnings)
@@ -347,7 +348,7 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
             continue
         summaries.append(f"*{_escape_md(channel_name)}*\n{stripped}")
 
-    header = _build_header(hostname, "Teams Summary", window_end)
+    header = _build_header(hostname, "Teams Summary", window_end, timeframe)
 
     if not summaries:
         # Distinguish between genuine no-activity and total failure
@@ -401,9 +402,9 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
         send_telegram(f"teams-summary FATAL: {_escape_md(str(e))}", hostname=hostname)
         return
 
-    min_file_size = config.get("min_file_size", 500)
+    ignore_files_smaller_than_bytes = config.get("ignore_files_smaller_than_bytes", 500)
     try:
-        files, scan_warnings = discover_files(config["data_dir"], window_start, window_end, min_file_size, logger)
+        files, scan_warnings = discover_files(config["data_dir"], window_start, window_end, ignore_files_smaller_than_bytes, logger)
     except OSError as e:
         logger.error(f"Data directory error: {e}")
         send_telegram(f"teams-summary notify-on-match FATAL: {_escape_md(str(e))}", hostname=hostname)
@@ -549,7 +550,7 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
 
     # Mentioned and unresolved — send notification
     logger.info(f"Keywords mentioned and UNRESOLVED: {keywords_str}")
-    header = _build_header(hostname, "Teams Alert", window_end)
+    header = _build_header(hostname, "Teams Alert", window_end, timeframe)
     warning_note = ""
     if all_warnings:
         escaped = "; ".join(_escape_md(w) for w in all_warnings)
@@ -606,6 +607,7 @@ def parse_timeframe(timeframe: str) -> tuple[datetime, datetime]:
 
 def main() -> None:
     import argparse
+    import time
 
     parser = argparse.ArgumentParser(description="Teams summary service")
     parser.add_argument("--tests", action="store_true", help="Run tests and exit")
@@ -614,10 +616,15 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.tests:
-        return
+        sys.argv = [sys.argv[0]]
+        import unittest
 
+        unittest.main(module="__main__", exit=True)
+
+    t0 = time.monotonic()
     logger, log_file = setup_logging("teams-summary")
-    logger.info("Starting teams-summary service")
+    mode = "notify-on-match" if args.notify_on_match else "summary"
+    logger.info(f"{'*' * 20} teams-summary ({mode}) starting {'*' * 20}")
 
     config_path = Path(__file__).resolve().parent / "config.yaml"
     try:
@@ -628,11 +635,12 @@ def main() -> None:
         return
 
     if args.notify_on_match:
-        logger.info(f"Notify-on-match mode: {args.notify_on_match}")
         run_notify_on_match(config, args, logger)
     else:
-        logger.info("Summary mode")
         run_summary(config, args, logger)
+
+    elapsed = time.monotonic() - t0
+    logger.info(f"{'*' * 20} completed, elapsed {elapsed / 60:.1f}m {'*' * 20}")
 
 
 if __name__ == "__main__":
@@ -689,7 +697,7 @@ if __name__ == "__main__":
                     config = load_config(Path(f.name))
                 self.assertEqual(config.get("hostname"), None)
                 self.assertEqual(config.get("channels"), None)
-                self.assertEqual(config.get("min_file_size"), None)
+                self.assertEqual(config.get("ignore_files_smaller_than_bytes"), None)
                 Path(f.name).unlink()
 
             def test_empty_config(self):
@@ -750,7 +758,7 @@ if __name__ == "__main__":
                     "data_dir": self.tmpdir,
                     "timeframe": "14h",
                     "hostname": "testhost",
-                    "min_file_size": 10,
+                    "ignore_files_smaller_than_bytes": 10,
                 }
 
             def tearDown(self):
@@ -1186,7 +1194,7 @@ if __name__ == "__main__":
                     "data_dir": self.tmpdir,
                     "timeframe": "14h",
                     "hostname": "testhost",
-                    "min_file_size": 10,
+                    "ignore_files_smaller_than_bytes": 10,
                 }
 
             def tearDown(self):
@@ -1407,7 +1415,7 @@ if __name__ == "__main__":
                     "data_dir": self.tmpdir,
                     "timeframe": "14h",
                     "hostname": "testhost",
-                    "min_file_size": 10,
+                    "ignore_files_smaller_than_bytes": 10,
                 }
 
             def tearDown(self):

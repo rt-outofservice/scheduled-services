@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+
+# Per-host env files may contain secrets — only the example is committed
+env.*-main.yml
+!env.example-main.yml
