@@ -69,8 +69,8 @@ def _call_claude(prompt: str, model: str = "", timeout: int = 600) -> str:
     except FileNotFoundError:
         raise AIError("claude binary not found — is it installed and on PATH?") from None
     if result.returncode != 0:
-        stderr = result.stderr.strip()
-        raise AIError(f"claude -p failed (exit {result.returncode}): {stderr}")
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise AIError(f"claude -p failed (exit {result.returncode}): {detail}")
     return result.stdout.strip()
 
 

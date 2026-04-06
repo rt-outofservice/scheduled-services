@@ -312,7 +312,9 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
 
     ignore_files_smaller_than_bytes = config.get("ignore_files_smaller_than_bytes", 500)
     try:
-        files, scan_warnings = discover_files(config["data_dir"], window_start, window_end, ignore_files_smaller_than_bytes, logger)
+        files, scan_warnings = discover_files(
+            config["data_dir"], window_start, window_end, ignore_files_smaller_than_bytes, logger
+        )
     except OSError as e:
         logger.error(f"Data directory error: {e}")
         send_telegram(f"teams-summary FATAL: {_escape_md(str(e))}", hostname=hostname)
@@ -422,7 +424,9 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
 
     ignore_files_smaller_than_bytes = config.get("ignore_files_smaller_than_bytes", 500)
     try:
-        files, scan_warnings = discover_files(config["data_dir"], window_start, window_end, ignore_files_smaller_than_bytes, logger)
+        files, scan_warnings = discover_files(
+            config["data_dir"], window_start, window_end, ignore_files_smaller_than_bytes, logger
+        )
     except OSError as e:
         logger.error(f"Data directory error: {e}")
         send_telegram(f"teams-summary notify-on-match FATAL: {_escape_md(str(e))}", hostname=hostname)
@@ -454,10 +458,19 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
             )
         return
 
-    # Read all file contents
-    all_content_parts = []
+    # Process per-channel to stay within AI context limits
+    provider = config.get("llm_provider", "claude")
+    model = config.get("llm_model", "")
+    effort = config.get("llm_model_effort", "")
+    keywords_str = ", ".join(keywords)
+
     read_warnings: list[str] = []
+    channel_hits = []  # (channel_name, context_str) for unresolved mentions
+    ai_errors: list[str] = []
+    any_readable = False
+
     for channel_name, channel_files in sorted(grouped.items()):
+        parts = []
         for info in channel_files:
             try:
                 content = _retry_on_transient(lambda p=info.path: p.read_text(encoding="utf-8"))
@@ -467,15 +480,76 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
                 read_warnings.append(msg)
                 continue
             header = (
-                f"--- {channel_name}: {info.path.name} "
+                f"--- {info.path.name} "
                 f"(covers {info.start_time.strftime('%Y-%m-%d %H:%M')} to "
                 f"{info.end_time.strftime('%Y-%m-%d %H:%M')} ET) ---"
             )
-            all_content_parts.append(f"{header}\n{content}")
+            parts.append(f"{header}\n{content}")
 
-    all_warnings = list(scan_warnings) + read_warnings
+        if not parts:
+            continue
+        any_readable = True
+        combined = "\n\n".join(parts)
 
-    if not all_content_parts:
+        prompt = (
+            "You are a Teams chat monitoring assistant. Check if any of the following "
+            f"keywords/phrases are discussed in these Microsoft Teams messages from "
+            f"the '{channel_name}' channel: {keywords_str}\n\n"
+            "Respond with a JSON object containing exactly these fields:\n"
+            '- "mentioned": boolean — true if any of the keywords/phrases appear or are '
+            "discussed in the conversations\n"
+            '- "resolved": boolean — true if the topic was discussed AND resolved/concluded '
+            "(someone provided a fix, answer, or confirmation that no action is needed)\n"
+            '- "context": string — brief summary (2-4 sentences) of what was discussed about '
+            "the keywords, including who was involved and what was said. If not mentioned, "
+            'write "Not mentioned in any conversations."\n\n'
+            "Important:\n"
+            "- Look for both exact keyword matches and semantic references to the topics\n"
+            "- Only set resolved=true if there is clear evidence the issue is handled\n"
+            "- Return ONLY the JSON object, no other text\n\n"
+            f"Messages:\n{combined}"
+        )
+
+        try:
+            result = call_ai_json(prompt, provider=provider, model=model, effort=effort)
+        except AIError as e:
+            msg = f"AI failed for {channel_name}: {e}"
+            logger.error(msg)
+            ai_errors.append(msg)
+            continue
+
+        if not isinstance(result, dict):
+            logger.error(f"AI returned unexpected JSON type for {channel_name}: {type(result).__name__}")
+            ai_errors.append(f"Unexpected AI response format for {channel_name}")
+            continue
+
+        missing_fields = [f for f in ("mentioned", "resolved", "context") if f not in result]
+        if missing_fields:
+            logger.error(f"AI response missing fields for {channel_name}: {', '.join(missing_fields)}")
+            ai_errors.append(f"Missing fields for {channel_name}: {', '.join(missing_fields)}")
+            continue
+
+        invalid_fields = [f for f in ("mentioned", "resolved") if not _is_valid_bool_value(result[f])]
+        if invalid_fields:
+            logger.error(f"AI invalid bool values for {channel_name}: {', '.join(invalid_fields)}")
+            ai_errors.append(f"Invalid bool values for {channel_name}: {', '.join(invalid_fields)}")
+            continue
+
+        mentioned = _coerce_bool(result["mentioned"])
+        resolved = _coerce_bool(result["resolved"])
+        context = str(result["context"])
+
+        if mentioned and not resolved:
+            logger.info(f"Keywords UNRESOLVED in {channel_name}")
+            channel_hits.append((channel_name, context))
+        elif mentioned:
+            logger.info(f"Keywords mentioned but resolved in {channel_name}")
+        else:
+            logger.debug(f"Keywords not mentioned in {channel_name}")
+
+    all_warnings = list(scan_warnings) + read_warnings + ai_errors
+
+    if not any_readable:
         if all_warnings:
             logger.error(f"No readable files with errors: {'; '.join(all_warnings)}")
             escaped = "; ".join(_escape_md(w) for w in all_warnings)
@@ -487,81 +561,12 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
             logger.info("No readable files for notify-on-match")
         return
 
-    combined = "\n\n".join(all_content_parts)
-    keywords_str = ", ".join(keywords)
-
-    prompt = (
-        "You are a Teams chat monitoring assistant. Check if any of the following "
-        f"keywords/phrases are discussed in these Microsoft Teams messages: {keywords_str}\n\n"
-        "Respond with a JSON object containing exactly these fields:\n"
-        '- "mentioned": boolean — true if any of the keywords/phrases appear or are '
-        "discussed in the conversations\n"
-        '- "resolved": boolean — true if the topic was discussed AND resolved/concluded '
-        "(someone provided a fix, answer, or confirmation that no action is needed)\n"
-        '- "context": string — brief summary (2-4 sentences) of what was discussed about '
-        "the keywords, including who was involved and what was said. If not mentioned, "
-        'write "Not mentioned in any conversations."\n\n'
-        "Important:\n"
-        "- Look for both exact keyword matches and semantic references to the topics\n"
-        "- Only set resolved=true if there is clear evidence the issue is handled\n"
-        "- Return ONLY the JSON object, no other text\n\n"
-        f"Messages:\n{combined}"
-    )
-
-    provider = config.get("llm_provider", "claude")
-    model = config.get("llm_model", "")
-    effort = config.get("llm_model_effort", "")
-
-    try:
-        result = call_ai_json(prompt, provider=provider, model=model, effort=effort)
-    except AIError as e:
-        logger.error(f"AI notify-on-match failed: {e}")
-        send_telegram(f"teams-summary notify-on-match FATAL: AI call failed: {_escape_md(str(e))}", hostname=hostname)
-        return
-
-    if not isinstance(result, dict):
-        logger.error(f"AI returned unexpected JSON type: {type(result).__name__}")
-        send_telegram("teams-summary notify-on-match FATAL: unexpected AI response format", hostname=hostname)
-        return
-
-    missing_fields = [f for f in ("mentioned", "resolved", "context") if f not in result]
-    if missing_fields:
-        logger.error(f"AI response missing required fields: {', '.join(missing_fields)}")
-        send_telegram(
-            f"teams-summary notify-on-match FATAL: AI response missing fields: {', '.join(missing_fields)}",
-            hostname=hostname,
-        )
-        return
-
-    invalid_fields = [f for f in ("mentioned", "resolved") if not _is_valid_bool_value(result[f])]
-    if invalid_fields:
-        logger.error(f"AI response has invalid bool values for: {', '.join(invalid_fields)}")
-        send_telegram(
-            f"teams-summary notify-on-match FATAL: invalid bool values for: {', '.join(invalid_fields)}",
-            hostname=hostname,
-        )
-        return
-
-    mentioned = _coerce_bool(result["mentioned"])
-    resolved = _coerce_bool(result["resolved"])
-    context = str(result["context"])
-
-    if not mentioned:
-        logger.info(f"Keywords not mentioned: {keywords_str}")
+    if not channel_hits:
+        logger.info(f"Keywords not mentioned or resolved: {keywords_str}")
         if all_warnings:
             escaped = "; ".join(_escape_md(w) for w in all_warnings)
             send_telegram(
-                f"teams-summary notify-on-match WARNING: partial scan — some files unreadable: {escaped}",
-                hostname=hostname,
-            )
-        return
-
-    if resolved:
-        logger.info(f"Keywords mentioned but resolved: {keywords_str}")
-        if all_warnings:
-            escaped = "; ".join(_escape_md(w) for w in all_warnings)
-            send_telegram(
-                f"teams-summary notify-on-match WARNING: partial scan — some files unreadable: {escaped}",
+                f"teams-summary notify-on-match WARNING: partial scan — some errors occurred: {escaped}",
                 hostname=hostname,
             )
         return
@@ -569,11 +574,15 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
     # Mentioned and unresolved — send notification
     logger.info(f"Keywords mentioned and UNRESOLVED: {keywords_str}")
     header = _build_header(hostname, "Teams Alert", window_end, timeframe)
+    context_parts = []
+    for ch_name, ctx in channel_hits:
+        context_parts.append(f"*{_escape_md(ch_name)}*: {_escape_md(ctx)}")
+    context_text = "\n\n".join(context_parts)
     warning_note = ""
     if all_warnings:
         escaped = "; ".join(_escape_md(w) for w in all_warnings)
         warning_note = f"\n\nNote: partial scan — {escaped}"
-    message = f"{header}\n\n{_escape_md(context)}{warning_note}"
+    message = f"{header}\n\n{context_text}{warning_note}"
 
     try:
         sent_ok = send_telegram(message)
@@ -1555,7 +1564,8 @@ if __name__ == "__main__":
                 run_notify_on_match(self.config, self._make_args(), self.logger)
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
-                self.assertIn("FATAL", msg)
+                self.assertIn("WARNING", msg)
+                self.assertIn("AI fail", msg)
 
             @patch("__main__.call_ai_json", return_value=["not", "a", "dict"])
             @patch("__main__.send_telegram", return_value=True)
@@ -1564,8 +1574,8 @@ if __name__ == "__main__":
                 run_notify_on_match(self.config, self._make_args(), self.logger)
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
-                self.assertIn("FATAL", msg)
-                self.assertIn("unexpected AI response format", msg)
+                self.assertIn("WARNING", msg)
+                self.assertIn("Unexpected AI response format", msg)
 
             @patch("__main__.call_ai_json", return_value={})
             @patch("__main__.send_telegram", return_value=True)
@@ -1575,8 +1585,8 @@ if __name__ == "__main__":
                 run_notify_on_match(self.config, self._make_args(), self.logger)
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
-                self.assertIn("FATAL", msg)
-                self.assertIn("missing fields", msg)
+                self.assertIn("WARNING", msg)
+                self.assertIn("Missing fields", msg)
 
             @patch("__main__.call_ai_json", return_value={"context": "Discussed outage"})
             @patch("__main__.send_telegram", return_value=True)
@@ -1586,8 +1596,8 @@ if __name__ == "__main__":
                 run_notify_on_match(self.config, self._make_args(), self.logger)
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
-                self.assertIn("FATAL", msg)
-                self.assertIn("missing fields", msg)
+                self.assertIn("WARNING", msg)
+                self.assertIn("Missing fields", msg)
                 self.assertIn("mentioned", msg)
                 self.assertIn("resolved", msg)
 
@@ -1602,8 +1612,8 @@ if __name__ == "__main__":
                 run_notify_on_match(self.config, self._make_args(), self.logger)
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
-                self.assertIn("FATAL", msg)
-                self.assertIn("invalid bool values", msg)
+                self.assertIn("WARNING", msg)
+                self.assertIn("Invalid bool values", msg)
 
             @patch(
                 "__main__.call_ai_json",
@@ -1616,8 +1626,8 @@ if __name__ == "__main__":
                 run_notify_on_match(self.config, self._make_args(), self.logger)
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
-                self.assertIn("FATAL", msg)
-                self.assertIn("invalid bool values", msg)
+                self.assertIn("WARNING", msg)
+                self.assertIn("Invalid bool values", msg)
 
             @patch(
                 "__main__.call_ai_json",
@@ -1630,8 +1640,8 @@ if __name__ == "__main__":
                 run_notify_on_match(self.config, self._make_args(), self.logger)
                 mock_tg.assert_called_once()
                 msg = mock_tg.call_args[0][0]
-                self.assertIn("FATAL", msg)
-                self.assertIn("invalid bool values", msg)
+                self.assertIn("WARNING", msg)
+                self.assertIn("Invalid bool values", msg)
 
             @patch("__main__.send_telegram", return_value=True)
             def test_no_files_no_action(self, mock_tg):
