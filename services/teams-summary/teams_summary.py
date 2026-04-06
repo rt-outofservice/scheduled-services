@@ -81,14 +81,14 @@ def parse_filename(filename: str, file_path: Path) -> FileInfo | None:
 TRANSIENT_ERRNOS = {errno.EDEADLK, errno.EAGAIN}
 
 
-def _retry_on_transient(fn, retries=3, delay=1.0):
+def _retry_on_transient(fn, retries=5, delay=2.0):
     """Retry fn() on transient OS errors (EDEADLK, EAGAIN) from cloud filesystems."""
     for attempt in range(retries):
         try:
             return fn()
         except OSError as e:
             if e.errno in TRANSIENT_ERRNOS and attempt < retries - 1:
-                time.sleep(delay)
+                time.sleep(delay * (attempt + 1))
                 continue
             raise
 
