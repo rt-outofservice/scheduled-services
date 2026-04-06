@@ -249,7 +249,7 @@ def read_and_summarize_channel(
     read_warnings: list[str] = []
     for info in file_infos:
         try:
-            content = info.path.read_text(encoding="utf-8")
+            content = _retry_on_transient(lambda p=info.path: p.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError) as e:
             msg = f"Failed to read {info.path}: {e}"
             logger.warning(msg)
@@ -460,7 +460,7 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
     for channel_name, channel_files in sorted(grouped.items()):
         for info in channel_files:
             try:
-                content = info.path.read_text(encoding="utf-8")
+                content = _retry_on_transient(lambda p=info.path: p.read_text(encoding="utf-8"))
             except (OSError, UnicodeDecodeError) as e:
                 msg = f"Failed to read {info.path}: {e}"
                 logger.warning(msg)
