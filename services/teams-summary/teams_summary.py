@@ -19,9 +19,11 @@ Config (config.yaml):
     llm_model_effort: ""
 """
 
+import errno
 import logging
 import re
 import sys
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -76,6 +78,21 @@ def parse_filename(filename: str, file_path: Path) -> FileInfo | None:
     )
 
 
+TRANSIENT_ERRNOS = {errno.EDEADLK, errno.EAGAIN}
+
+
+def _retry_on_transient(fn, retries=3, delay=1.0):
+    """Retry fn() on transient OS errors (EDEADLK, EAGAIN) from cloud filesystems."""
+    for attempt in range(retries):
+        try:
+            return fn()
+        except OSError as e:
+            if e.errno in TRANSIENT_ERRNOS and attempt < retries - 1:
+                time.sleep(delay)
+                continue
+            raise
+
+
 def discover_files(
     data_dir: str,
     window_start: datetime,
@@ -98,7 +115,7 @@ def discover_files(
     results = []
     scan_warnings: list[str] = []
     try:
-        entries = sorted(root.iterdir())
+        entries = sorted(_retry_on_transient(root.iterdir))
     except OSError as e:
         raise OSError(f"Cannot list data directory {root}: {e}") from e
     for entry in entries:
@@ -113,7 +130,7 @@ def discover_files(
             continue
 
         try:
-            json_files = list(entry.iterdir())
+            json_files = list(_retry_on_transient(entry.iterdir))
         except OSError as e:
             msg = f"Cannot list directory {entry}: {e}"
             logger.warning(msg)
@@ -123,7 +140,7 @@ def discover_files(
             if not json_file.name.endswith(".json"):
                 continue
             try:
-                file_size = json_file.stat().st_size
+                file_size = _retry_on_transient(lambda f=json_file: f.stat().st_size)
             except OSError as e:
                 msg = f"Cannot stat {json_file}: {e}"
                 logger.warning(msg)
@@ -1014,6 +1031,48 @@ if __name__ == "__main__":
                 with patch("pathlib.Path.iterdir", failing_iterdir), self.assertRaises(OSError):
                     discover_files(self.tmpdir, window_start, window_end, 500, self.logger)
 
+            def test_transient_edeadlk_retried_on_folder_iterdir(self):
+                """EDEADLK on folder iterdir is retried and succeeds."""
+                folder = Path(self.tmpdir) / "2026-04-02"
+                os.makedirs(folder)
+                (folder / "General_60mins_2026-04-02-1400.json").write_text("x" * 600)
+                window_start = datetime(2026, 4, 2, 10, 0, tzinfo=ET)
+                window_end = datetime(2026, 4, 2, 16, 0, tzinfo=ET)
+                original_iterdir = Path.iterdir
+                call_count = 0
+
+                def flaky_iterdir(self_path, *args, **kwargs):
+                    nonlocal call_count
+                    if self_path.name == "2026-04-02":
+                        call_count += 1
+                        if call_count == 1:
+                            raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+                    return original_iterdir(self_path, *args, **kwargs)
+
+                with patch("pathlib.Path.iterdir", flaky_iterdir), patch("teams_summary.time.sleep"):
+                    results, warnings = discover_files(self.tmpdir, window_start, window_end, 500, self.logger)
+                self.assertEqual(len(results), 1)
+                self.assertEqual(len(warnings), 0)
+
+            def test_persistent_edeadlk_becomes_warning(self):
+                """EDEADLK that persists through all retries still produces a warning."""
+                folder = Path(self.tmpdir) / "2026-04-02"
+                os.makedirs(folder)
+                window_start = datetime(2026, 4, 2, 10, 0, tzinfo=ET)
+                window_end = datetime(2026, 4, 2, 16, 0, tzinfo=ET)
+                original_iterdir = Path.iterdir
+
+                def always_deadlock(self_path, *args, **kwargs):
+                    if self_path.name == "2026-04-02":
+                        raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+                    return original_iterdir(self_path, *args, **kwargs)
+
+                with patch("pathlib.Path.iterdir", always_deadlock), patch("teams_summary.time.sleep"):
+                    results, warnings = discover_files(self.tmpdir, window_start, window_end, 500, self.logger)
+                self.assertEqual(len(results), 0)
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("Resource deadlock avoided", warnings[0])
+
         class TestGroupByChannel(unittest.TestCase):
             def _make_info(self, name, hour):
                 return FileInfo(
@@ -1325,11 +1384,12 @@ if __name__ == "__main__":
             @patch("__main__.send_telegram", return_value=True)
             def test_scan_warnings_in_no_activity_message(self, mock_tg):
                 """Scan warnings should escalate to WARNING when no files found."""
-                os.makedirs(Path(self.tmpdir) / "2026-04-02")
+                today = datetime.now(ET).strftime("%Y-%m-%d")
+                os.makedirs(Path(self.tmpdir) / today)
                 original_iterdir = Path.iterdir
 
                 def failing_iterdir(self_path, *args, **kwargs):
-                    if self_path.name == "2026-04-02":
+                    if self_path.name == today:
                         raise OSError("Permission denied")
                     return original_iterdir(self_path, *args, **kwargs)
 
@@ -1595,11 +1655,12 @@ if __name__ == "__main__":
             @patch("__main__.send_telegram", return_value=True)
             def test_scan_warnings_send_telegram_when_no_files(self, mock_tg):
                 """Scan warnings should trigger telegram when no files found."""
-                os.makedirs(Path(self.tmpdir) / "2026-04-02")
+                today = datetime.now(ET).strftime("%Y-%m-%d")
+                os.makedirs(Path(self.tmpdir) / today)
                 original_iterdir = Path.iterdir
 
                 def failing_iterdir(self_path, *args, **kwargs):
-                    if self_path.name == "2026-04-02":
+                    if self_path.name == today:
                         raise OSError("Permission denied")
                     return original_iterdir(self_path, *args, **kwargs)
 
