@@ -11,7 +11,7 @@ Deployed via [umputun/spot](https://github.com/umputun/spot) to `~/.scheduled-se
 | **news-digest** | Linux | Fetches RSS/Atom feeds, deduplicates articles, uses AI to generate per-group digests, sends via Telegram | `claude` |
 | **pr-auto-approve** | macOS | Discovers open PRs/MRs across GitHub/GitLab orgs, applies complexity gates, uses AI for safety review, auto-approves infra changes | `claude`, `gh`, `glab` (if GitLab targets) |
 | **slack-summary** | macOS | Dumps Slack channels via slackdump, resolves users, uses AI to summarize discussions, sends via Telegram | `claude`, `slackdump` |
-| **teams-summary** | macOS | Reads pre-existing MS Teams JSON message dumps, summarizes conversations per channel via AI, sends via Telegram. Supports keyword monitoring mode with contextual alerts | `claude` |
+| **teams-summary** | macOS | Reads pre-existing MS Teams JSON message dumps, summarizes conversations per channel via AI, sends via Telegram. Supports keyword monitoring mode with contextual alerts. Data directory is typically OneDrive-synced — see [OneDrive note](#teams-summary--onedrive) | `claude` |
 
 ## Directory Structure
 
@@ -132,6 +132,19 @@ The playbook will:
 - Install crontab entries for Linux services (`# BEGIN/END managed:scheduled-<service>`)
 - Install LaunchAgent plists for macOS services (`~/Library/LaunchAgents/com.scheduled-services.<name>.plist`)
 - Send a Telegram notification on completion
+
+## teams-summary — OneDrive
+
+The `data_dir` for teams-summary typically points to a OneDrive-synced folder (e.g. `~/Library/CloudStorage/OneDrive-.../Automation/Teams/Daily/`). On macOS, OneDrive may "dehydrate" files and folders that haven't been accessed recently, keeping only cloud-only placeholders locally. When the script tries to read dehydrated files, macOS returns `EDEADLK` (errno 11 — "Resource deadlock avoided").
+
+The script retries transient OS errors with exponential backoff, but this adds latency and can still fail if OneDrive is slow to rehydrate.
+
+**To avoid this, configure OneDrive to always keep the data directory available locally:**
+
+1. Open Finder and navigate to the Teams dump folder
+2. Right-click the folder → "Always Keep on This Device"
+
+This ensures OneDrive keeps the files downloaded and prevents dehydration-related read failures.
 
 ## Adding a New Service
 
