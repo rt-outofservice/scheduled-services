@@ -93,6 +93,7 @@ Some services maintain state files in their service directory (preserved across 
 
 - `services/pr-auto-approve/reviews.md` — append-only log of all reviewed PRs/MRs
 - `services/slack-summary/user-cache.txt` — cached Slack user ID to display name mappings (USERID=DisplayName per line)
+- `services/teams-summary/notify_state.json` — tracks today's reported keyword alerts to avoid duplicates (resets daily)
 
 ## Deployment Scripts
 

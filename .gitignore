@@ -6,3 +6,6 @@ __pycache__/
 # Per-host env files may contain secrets — only the example is committed
 env.*-main.yml
 !env.example-main.yml
+
+# Runtime state files (preserved across deploys)
+services/teams-summary/notify_state.json

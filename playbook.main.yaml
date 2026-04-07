@@ -109,7 +109,7 @@ tasks:
           rsync -a --delete \
             --exclude='__pycache__' --exclude='*.pyc' --exclude='config.yaml' \
             --exclude='.version' --exclude='.lock' --exclude='reviews.md' \
-            --exclude='user-cache.txt' --exclude='.venv' \
+            --exclude='user-cache.txt' --exclude='notify_state.json' --exclude='.venv' \
             /tmp/.sched-svc-deploy/ ~/.scheduled-services/
 
       - name: deploy-version

@@ -20,6 +20,7 @@ Config (config.yaml):
 """
 
 import errno
+import json
 import logging
 import re
 import sys
@@ -400,12 +401,51 @@ def run_summary(config: dict, args, logger: logging.Logger) -> None:
         logger.warning("Teams summary telegram delivery failed")
 
 
-def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
+NOTIFY_STATE_FILE = "notify_state.json"
+
+
+def _load_notify_state(service_dir: Path, logger: logging.Logger) -> dict:
+    """Load previous notify-on-match alert state.
+
+    Returns dict with 'reported' (list of {channel, context, timestamp}) and
+    'date' (ISO date string). State resets when the date changes.
+    """
+    state_path = service_dir / NOTIFY_STATE_FILE
+    today = datetime.now(ET).strftime("%Y-%m-%d")
+    empty = {"date": today, "reported": []}
+    if not state_path.exists():
+        return empty
+    try:
+        data = json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to read notify state, resetting: {e}")
+        return empty
+    if data.get("date") != today:
+        logger.info("Notify state is from a previous day, resetting")
+        return empty
+    return data
+
+
+def _save_notify_state(
+    service_dir: Path, state: dict, logger: logging.Logger
+) -> None:
+    """Persist notify-on-match alert state."""
+    state_path = service_dir / NOTIFY_STATE_FILE
+    try:
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"Failed to save notify state: {e}")
+
+
+def run_notify_on_match(
+    config: dict, args, logger: logging.Logger, service_dir: Path | None = None
+) -> None:
     """Check conversations for keyword mentions and notify if unresolved.
 
     Discovers files same as summary mode, reads all relevant JSON content,
     uses AI to check for keyword mentions. Only sends Telegram if keywords
-    are mentioned and the topic is unresolved.
+    are mentioned and the topic is unresolved. Tracks previously reported
+    alerts in notify_state.json to avoid duplicate notifications.
     """
     hostname = config.get("hostname", "")
     timeframe = args.timeframe if args.timeframe else config["timeframe"]
@@ -434,12 +474,7 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
 
     if not files:
         if scan_warnings:
-            logger.error(f"No files found with scan errors: {'; '.join(scan_warnings)}")
-            escaped = "; ".join(_escape_md(w) for w in scan_warnings)
-            send_telegram(
-                f"teams-summary notify-on-match WARNING: scan errors may have prevented keyword detection: {escaped}",
-                hostname=hostname,
-            )
+            logger.warning(f"No files found with scan errors: {'; '.join(scan_warnings)}")
         else:
             logger.info("No matching files found for notify-on-match")
         return
@@ -448,15 +483,25 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
     grouped = group_by_channel(files, channels_filter)
 
     if not grouped:
-        logger.info("No channels matched after filtering for notify-on-match")
         if scan_warnings:
-            logger.error(f"No channels matched but scan had warnings: {'; '.join(scan_warnings)}")
-            escaped = "; ".join(_escape_md(w) for w in scan_warnings)
-            send_telegram(
-                f"teams-summary notify-on-match WARNING: scan errors may have prevented keyword detection: {escaped}",
-                hostname=hostname,
-            )
+            logger.warning(f"No channels matched, scan errors: {'; '.join(scan_warnings)}")
+        else:
+            logger.info("No channels matched after filtering for notify-on-match")
         return
+
+    # Load previous alert state to avoid duplicate notifications
+    state = {"date": datetime.now(ET).strftime("%Y-%m-%d"), "reported": []}
+    if service_dir:
+        state = _load_notify_state(service_dir, logger)
+    prev_contexts = {
+        r["channel"]: r["context"]
+        for r in state.get("reported", [])
+    }
+    if prev_contexts:
+        logger.info(
+            f"Loaded {len(prev_contexts)} previous alert(s): "
+            f"{', '.join(prev_contexts.keys())}"
+        )
 
     # Process per-channel to stay within AI context limits
     provider = config.get("llm_provider", "claude")
@@ -491,6 +536,16 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
         any_readable = True
         combined = "\n\n".join(parts)
 
+        prev_note = ""
+        if channel_name in prev_contexts:
+            prev_note = (
+                "\n\nIMPORTANT — The following was ALREADY REPORTED in a previous alert "
+                "today. Only set mentioned=true if there is NEW information, updates, "
+                "or developments beyond what was already reported. If the conversation "
+                "is unchanged or only contains the same content, set mentioned=false.\n"
+                f"Previously reported: {prev_contexts[channel_name]}\n"
+            )
+
         prompt = (
             "You are a Teams chat monitoring assistant. Check if any of the following "
             f"keywords/phrases are discussed in these Microsoft Teams messages from "
@@ -506,7 +561,7 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
             "Important:\n"
             "- Look for both exact keyword matches and semantic references to the topics\n"
             "- Only set resolved=true if there is clear evidence the issue is handled\n"
-            "- Return ONLY the JSON object, no other text\n\n"
+            f"- Return ONLY the JSON object, no other text{prev_note}\n\n"
             f"Messages:\n{combined}"
         )
 
@@ -551,29 +606,21 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
 
     if not any_readable:
         if all_warnings:
-            logger.error(f"No readable files with errors: {'; '.join(all_warnings)}")
-            escaped = "; ".join(_escape_md(w) for w in all_warnings)
-            send_telegram(
-                f"teams-summary notify-on-match WARNING: file errors may have prevented keyword detection: {escaped}",
-                hostname=hostname,
-            )
+            logger.warning(f"No readable files with errors: {'; '.join(all_warnings)}")
         else:
             logger.info("No readable files for notify-on-match")
         return
 
     if not channel_hits:
-        logger.info(f"Keywords not mentioned or resolved: {keywords_str}")
         if all_warnings:
-            escaped = "; ".join(_escape_md(w) for w in all_warnings)
-            send_telegram(
-                f"teams-summary notify-on-match WARNING: partial scan — some errors occurred: {escaped}",
-                hostname=hostname,
-            )
+            logger.warning(f"Keywords not found, errors: {'; '.join(all_warnings)}")
+        else:
+            logger.info(f"Keywords not mentioned or resolved: {keywords_str}")
         return
 
     # Mentioned and unresolved — send notification
     logger.info(f"Keywords mentioned and UNRESOLVED: {keywords_str}")
-    header = _build_header(hostname, "Teams Alert", window_end, timeframe)
+    header = _build_header(hostname, "Teams Alert", window_end)
     context_parts = []
     for ch_name, ctx in channel_hits:
         context_parts.append(f"*{_escape_md(ch_name)}*: {_escape_md(ctx)}")
@@ -592,6 +639,22 @@ def run_notify_on_match(config: dict, args, logger: logging.Logger) -> None:
 
     if sent_ok:
         logger.info("Teams alert sent successfully")
+        # Save reported contexts to avoid duplicate alerts on next run
+        now_ts = datetime.now(ET).isoformat()
+        for ch_name, ctx in channel_hits:
+            # Update existing channel entry or add new one
+            existing = [
+                r for r in state["reported"] if r["channel"] == ch_name
+            ]
+            if existing:
+                existing[0]["context"] = ctx
+                existing[0]["timestamp"] = now_ts
+            else:
+                state["reported"].append(
+                    {"channel": ch_name, "context": ctx, "timestamp": now_ts}
+                )
+        if service_dir:
+            _save_notify_state(service_dir, state, logger)
     else:
         logger.warning("Teams alert telegram delivery failed")
 
@@ -662,7 +725,8 @@ def main() -> None:
         return
 
     if args.notify_on_match:
-        run_notify_on_match(config, args, logger)
+        service_dir = Path(__file__).resolve().parent
+        run_notify_on_match(config, args, logger, service_dir)
     else:
         run_summary(config, args, logger)
 
@@ -1559,89 +1623,68 @@ if __name__ == "__main__":
 
             @patch("__main__.call_ai_json", side_effect=AIError("AI fail"))
             @patch("__main__.send_telegram", return_value=True)
-            def test_ai_failure_sends_error_telegram(self, mock_tg, mock_ai):
+            def test_ai_failure_no_telegram(self, mock_tg, mock_ai):
+                """AI failure with no keyword hits should not send telegram."""
                 self._create_test_file()
                 run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("AI fail", msg)
+                mock_tg.assert_not_called()
 
             @patch("__main__.call_ai_json", return_value=["not", "a", "dict"])
             @patch("__main__.send_telegram", return_value=True)
-            def test_ai_non_dict_response_sends_error(self, mock_tg, mock_ai):
+            def test_ai_non_dict_response_no_telegram(self, mock_tg, mock_ai):
+                """AI returning bad format with no keyword hits should not send telegram."""
                 self._create_test_file()
                 run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Unexpected AI response format", msg)
+                mock_tg.assert_not_called()
 
             @patch("__main__.call_ai_json", return_value={})
             @patch("__main__.send_telegram", return_value=True)
-            def test_ai_empty_dict_sends_missing_fields_error(self, mock_tg, mock_ai):
-                """AI returning {} must be treated as format error, not 'not mentioned'."""
+            def test_ai_empty_dict_no_telegram(self, mock_tg, mock_ai):
+                """AI returning {} with no keyword hits should not send telegram."""
                 self._create_test_file()
                 run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Missing fields", msg)
+                mock_tg.assert_not_called()
 
             @patch("__main__.call_ai_json", return_value={"context": "Discussed outage"})
             @patch("__main__.send_telegram", return_value=True)
-            def test_ai_partial_fields_sends_missing_fields_error(self, mock_tg, mock_ai):
-                """AI returning only 'context' must not silently default mentioned=False."""
+            def test_ai_partial_fields_no_telegram(self, mock_tg, mock_ai):
+                """AI returning only 'context' with no keyword hits should not send telegram."""
                 self._create_test_file()
                 run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Missing fields", msg)
-                self.assertIn("mentioned", msg)
-                self.assertIn("resolved", msg)
+                mock_tg.assert_not_called()
 
             @patch(
                 "__main__.call_ai_json",
                 return_value={"mentioned": None, "resolved": False, "context": "Not mentioned."},
             )
             @patch("__main__.send_telegram", return_value=True)
-            def test_null_mentioned_sends_invalid_bool_error(self, mock_tg, mock_ai):
-                """AI returning null for mentioned must be a schema error, not silent False."""
+            def test_null_mentioned_no_telegram(self, mock_tg, mock_ai):
+                """AI returning null for mentioned should not send telegram."""
                 self._create_test_file()
                 run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Invalid bool values", msg)
+                mock_tg.assert_not_called()
 
             @patch(
                 "__main__.call_ai_json",
                 return_value={"mentioned": "maybe", "resolved": False, "context": "Unclear."},
             )
             @patch("__main__.send_telegram", return_value=True)
-            def test_unrecognized_string_mentioned_sends_invalid_bool_error(self, mock_tg, mock_ai):
-                """AI returning unrecognized string for mentioned must not silently become False."""
+            def test_unrecognized_string_mentioned_no_telegram(self, mock_tg, mock_ai):
+                """AI returning unrecognized string for mentioned should not send telegram."""
                 self._create_test_file()
                 run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Invalid bool values", msg)
+                mock_tg.assert_not_called()
 
             @patch(
                 "__main__.call_ai_json",
                 return_value={"mentioned": [True], "resolved": False, "context": "List."},
             )
             @patch("__main__.send_telegram", return_value=True)
-            def test_list_mentioned_sends_invalid_bool_error(self, mock_tg, mock_ai):
-                """AI returning list for mentioned must be a schema error."""
+            def test_list_mentioned_no_telegram(self, mock_tg, mock_ai):
+                """AI returning list for mentioned should not send telegram."""
                 self._create_test_file()
                 run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Invalid bool values", msg)
+                mock_tg.assert_not_called()
 
             @patch("__main__.send_telegram", return_value=True)
             def test_no_files_no_action(self, mock_tg):
@@ -1663,8 +1706,8 @@ if __name__ == "__main__":
                 mock_tg.assert_not_called()
 
             @patch("__main__.send_telegram", return_value=True)
-            def test_scan_warnings_send_telegram_when_no_files(self, mock_tg):
-                """Scan warnings should trigger telegram when no files found."""
+            def test_scan_warnings_no_telegram_when_no_files(self, mock_tg):
+                """Scan warnings without keyword hits should not send telegram."""
                 today = datetime.now(ET).strftime("%Y-%m-%d")
                 os.makedirs(Path(self.tmpdir) / today)
                 original_iterdir = Path.iterdir
@@ -1676,22 +1719,17 @@ if __name__ == "__main__":
 
                 with patch("pathlib.Path.iterdir", failing_iterdir):
                     run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Permission denied", msg)
+                mock_tg.assert_not_called()
 
             @patch("__main__.send_telegram", return_value=True)
-            def test_grouped_empty_with_scan_warnings_sends_warning(self, mock_tg):
-                """When channel filter drops all files but scan had warnings, send warning."""
+            def test_grouped_empty_with_scan_warnings_no_telegram(self, mock_tg):
+                """When channel filter drops all files, should not send telegram."""
                 today = datetime.now(ET).strftime("%Y-%m-%d")
                 folder = Path(self.tmpdir) / today
                 folder.mkdir()
                 now = datetime.now(ET)
-                # Create a file for a channel NOT in the filter
                 fname = f"OffTopic_60mins_{now.strftime('%Y-%m-%d-%H%M')}.json"
                 (folder / fname).write_text('{"messages": [{"text": "hello"}]}' * 10)
-                # Create a second date folder that will fail to list (generating scan_warning)
                 yesterday = (datetime.now(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
                 os.makedirs(Path(self.tmpdir) / yesterday)
                 original_iterdir = Path.iterdir
@@ -1704,10 +1742,7 @@ if __name__ == "__main__":
                 config = {**self.config, "channels": ["ImportantChannel"]}
                 with patch("pathlib.Path.iterdir", failing_iterdir):
                     run_notify_on_match(config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("Permission denied", msg)
+                mock_tg.assert_not_called()
 
             @patch(
                 "__main__.call_ai_json",
@@ -1762,15 +1797,14 @@ if __name__ == "__main__":
                 return_value={"mentioned": False, "resolved": False, "context": "Not mentioned."},
             )
             @patch("__main__.send_telegram", return_value=True)
-            def test_not_mentioned_with_scan_warnings_sends_warning(self, mock_tg, mock_ai):
-                """When AI says not mentioned but scan had warnings, send partial-scan warning."""
+            def test_not_mentioned_with_scan_warnings_no_telegram(self, mock_tg, mock_ai):
+                """When AI says not mentioned, should not send telegram even with scan warnings."""
                 today = datetime.now(ET).strftime("%Y-%m-%d")
                 folder = Path(self.tmpdir) / today
                 folder.mkdir()
                 now = datetime.now(ET)
                 fname = f"General_60mins_{now.strftime('%Y-%m-%d-%H%M')}.json"
                 (folder / fname).write_text('{"messages": [{"text": "hello"}]}' * 10)
-                # Also create a folder that will fail to list
                 yesterday = (datetime.now(ET) - timedelta(days=1)).strftime("%Y-%m-%d")
                 os.makedirs(Path(self.tmpdir) / yesterday)
                 original_iterdir = Path.iterdir
@@ -1782,15 +1816,11 @@ if __name__ == "__main__":
 
                 with patch("pathlib.Path.iterdir", failing_iterdir):
                     run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("partial scan", msg)
-                self.assertIn("Permission denied", msg)
+                mock_tg.assert_not_called()
 
             @patch("__main__.send_telegram", return_value=True)
-            def test_all_files_unreadable_sends_warning(self, mock_tg):
-                """When all discovered files fail to read, send a warning."""
+            def test_all_files_unreadable_no_telegram(self, mock_tg):
+                """When all files fail to read, should not send telegram."""
                 self._create_test_file()
                 original_read = Path.read_text
 
@@ -1801,10 +1831,7 @@ if __name__ == "__main__":
 
                 with patch("pathlib.Path.read_text", failing_read):
                     run_notify_on_match(self.config, self._make_args(), self.logger)
-                mock_tg.assert_called_once()
-                msg = mock_tg.call_args[0][0]
-                self.assertIn("WARNING", msg)
-                self.assertIn("file errors", msg)
+                mock_tg.assert_not_called()
 
             @patch(
                 "__main__.call_ai_json",
@@ -1836,6 +1863,129 @@ if __name__ == "__main__":
                 self.assertIn("Issue found.", msg)
                 self.assertIn("Note: partial scan", msg)
                 self.assertIn("Permission denied", msg)
+
+        class TestNotifyState(unittest.TestCase):
+            def setUp(self):
+                self.tmpdir = tempfile.mkdtemp()
+                self.state_dir = Path(self.tmpdir)
+                self.logger = logging.getLogger("test_state")
+
+            def tearDown(self):
+                import shutil
+
+                shutil.rmtree(self.tmpdir)
+
+            def test_load_empty_returns_today(self):
+                state = _load_notify_state(self.state_dir, self.logger)
+                self.assertEqual(state["date"], datetime.now(ET).strftime("%Y-%m-%d"))
+                self.assertEqual(state["reported"], [])
+
+            def test_save_and_load_roundtrip(self):
+                state = {
+                    "date": datetime.now(ET).strftime("%Y-%m-%d"),
+                    "reported": [
+                        {"channel": "General", "context": "Issue X", "timestamp": "2026-04-07T10:00:00"}
+                    ],
+                }
+                _save_notify_state(self.state_dir, state, self.logger)
+                loaded = _load_notify_state(self.state_dir, self.logger)
+                self.assertEqual(loaded["reported"][0]["channel"], "General")
+                self.assertEqual(loaded["reported"][0]["context"], "Issue X")
+
+            def test_stale_date_resets(self):
+                state = {
+                    "date": "2020-01-01",
+                    "reported": [{"channel": "Old", "context": "stale", "timestamp": "x"}],
+                }
+                _save_notify_state(self.state_dir, state, self.logger)
+                loaded = _load_notify_state(self.state_dir, self.logger)
+                self.assertEqual(loaded["date"], datetime.now(ET).strftime("%Y-%m-%d"))
+                self.assertEqual(loaded["reported"], [])
+
+            def test_corrupt_file_resets(self):
+                (self.state_dir / NOTIFY_STATE_FILE).write_text("not json")
+                loaded = _load_notify_state(self.state_dir, self.logger)
+                self.assertEqual(loaded["reported"], [])
+
+        class TestNotifyStateIntegration(unittest.TestCase):
+            def setUp(self):
+                self.tmpdir = tempfile.mkdtemp()
+                self.state_dir = tempfile.mkdtemp()
+                self.logger = logging.getLogger("test_notify_state_int")
+                self.config = {
+                    "data_dir": self.tmpdir,
+                    "timeframe": "14h",
+                    "hostname": "testhost",
+                    "ignore_files_smaller_than_bytes": 10,
+                }
+
+            def tearDown(self):
+                import shutil
+
+                shutil.rmtree(self.tmpdir)
+                shutil.rmtree(self.state_dir)
+
+            def _make_args(self, notify_on_match="keyword1,keyword2", timeframe=None):
+                from types import SimpleNamespace
+
+                return SimpleNamespace(timeframe=timeframe, notify_on_match=notify_on_match)
+
+            def _create_test_file(self, channel="General"):
+                folder = Path(self.tmpdir) / datetime.now(ET).strftime("%Y-%m-%d")
+                folder.mkdir(exist_ok=True)
+                now = datetime.now(ET)
+                fname = f"{channel}_60mins_{now.strftime('%Y-%m-%d-%H%M')}.json"
+                (folder / fname).write_text('{"messages": [{"text": "test"}]}' * 10)
+
+            @patch(
+                "__main__.call_ai_json",
+                return_value={"mentioned": True, "resolved": False, "context": "Issue found."},
+            )
+            @patch("__main__.send_telegram", return_value=True)
+            def test_alert_saves_state(self, mock_tg, mock_ai):
+                self._create_test_file()
+                run_notify_on_match(
+                    self.config, self._make_args(), self.logger,
+                    service_dir=Path(self.state_dir),
+                )
+                state = _load_notify_state(Path(self.state_dir), self.logger)
+                self.assertEqual(len(state["reported"]), 1)
+                self.assertEqual(state["reported"][0]["channel"], "General")
+                self.assertEqual(state["reported"][0]["context"], "Issue found.")
+
+            @patch("__main__.call_ai_json")
+            @patch("__main__.send_telegram", return_value=True)
+            def test_previous_context_included_in_prompt(self, mock_tg, mock_ai):
+                mock_ai.return_value = {
+                    "mentioned": False, "resolved": False, "context": "Not mentioned."
+                }
+                self._create_test_file()
+                # Pre-populate state with a previous alert
+                state = {
+                    "date": datetime.now(ET).strftime("%Y-%m-%d"),
+                    "reported": [
+                        {"channel": "General", "context": "Old issue X", "timestamp": "t"}
+                    ],
+                }
+                _save_notify_state(Path(self.state_dir), state, self.logger)
+                run_notify_on_match(
+                    self.config, self._make_args(), self.logger,
+                    service_dir=Path(self.state_dir),
+                )
+                prompt = mock_ai.call_args[0][0]
+                self.assertIn("ALREADY REPORTED", prompt)
+                self.assertIn("Old issue X", prompt)
+
+            @patch("__main__.call_ai_json")
+            @patch("__main__.send_telegram", return_value=True)
+            def test_no_state_dir_still_works(self, mock_tg, mock_ai):
+                """Without service_dir, runs without state (no crash)."""
+                mock_ai.return_value = {
+                    "mentioned": True, "resolved": False, "context": "Alert."
+                }
+                self._create_test_file()
+                run_notify_on_match(self.config, self._make_args(), self.logger)
+                mock_tg.assert_called_once()
 
         class TestCoerceBool(unittest.TestCase):
             def test_bool_true(self):
